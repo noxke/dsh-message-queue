@@ -167,7 +167,8 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const [localOrder, setLocalOrder] = useState<readonly string[] | undefined>(undefined)
   const [editing, setEditing] = useState<{ id: string; text: string; kind: QueueRow['kind'] } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
-  const [collapsed, setCollapsed] = useState(true)
+  // The dock opens expanded; one-row queues collapse like any other.
+  const [collapsed, setCollapsed] = useState(false)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const listRef = useRef<HTMLUListElement | null>(null)
@@ -244,13 +245,12 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const paused = remoteState?.paused === true
   const interactionActive = queueMutable && (editing !== null || busy !== null || draggingId !== null)
   const expanded = !collapsed || interactionActive
-  const listVisible = rowCount === 0 || sentRows.length > 0 ? true : rowCount === 1 || expanded
+  const listVisible = rowCount === 0 ? true : expanded
   const pauseAvailable = remoteState?.available !== false
 
   useEffect(() => {
-    if (rowCount === 0 && !collapsed) setCollapsed(true)
     if (editing !== null && (!queueMutable || !displayRows.some(row => row.id === editing.id))) setEditing(null)
-  }, [collapsed, displayRows, editing, queueMutable, rowCount])
+  }, [displayRows, editing, queueMutable])
 
   /** Visible destination for one row, undefined at its group edge. */
   const edgeTarget = (row: QueueRow, direction: -1 | 1): number | undefined => {
@@ -473,7 +473,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
       <div className="mq-panel">
         <div className="mq-head">
           <button type="button" className="mq-toggle" aria-controls="mq-list" aria-expanded={listVisible}
-            disabled={rowCount === 1 || interactionActive} onClick={() => { setCollapsed(value => !value) }}>
+            disabled={rowCount === 0 || interactionActive} onClick={() => { setCollapsed(value => !value) }}>
             <span className="mq-lead"><QueueIcon /></span>
             <span className="mq-count">
               {rowCount === 0
