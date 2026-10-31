@@ -55,8 +55,8 @@ function createInjected(scope: ClientScope, sessionId: string): QueueDockInjecte
         unwrap(await remote.move(sessionId, itemId, toIndex), 'move'),
       edit: async (itemId: string, text: string): Promise<QueueState> =>
         unwrap(await remote.edit(sessionId, itemId, text), 'edit'),
-      remove: async (itemId: string): Promise<QueueState> =>
-        unwrap(await remote.remove(sessionId, itemId), 'remove'),
+      discard: async (itemId: string): Promise<QueueState> =>
+        unwrap(await remote.discard(sessionId, itemId), 'discard'),
       steer: async (itemId: string): Promise<QueueState> =>
         unwrap(await remote.steer(sessionId, itemId), 'steer'),
       pause: async (): Promise<QueueState> => unwrap(await remote.pause(sessionId), 'pause'),

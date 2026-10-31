@@ -55,8 +55,8 @@ export interface MessageQueueRemote {
   move(sessionId: string, itemId: string, toIndex: number): Promise<RemoteResult<QueueOrder>>
   /** Edit one held (parked) item's text in place. */
   edit(sessionId: string, itemId: string, text: string): Promise<RemoteResult<QueueState>>
-  /** Remove one held (parked) item. */
-  remove(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
+  /** Discard one held (parked) item. */
+  discard(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Send one held (parked) item into the running turn ahead of the queue. */
   steer(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Pause claiming; the current turn finishes, later queued items stay queued. */
@@ -78,7 +78,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
       toIndex: number,
     ) => Promise<RemoteResult<QueueOrder>>
     'messageQueue/edit': (sessionId: string, itemId: string, text: string) => Promise<RemoteResult<QueueState>>
-    'messageQueue/remove': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
+    'messageQueue/discard': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/steer': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/pause': (sessionId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/resume': (sessionId: string) => Promise<RemoteResult<QueueState>>
@@ -239,9 +239,9 @@ export const QUEUE_EDIT_DESCRIPTOR = descriptor(
   STATE_RESULT_CODEC,
 )
 
-/** The `messageQueue/remove` invocation. */
-export const QUEUE_REMOVE_DESCRIPTOR = descriptor(
-  'remove',
+/** The `messageQueue/discard` invocation. */
+export const QUEUE_DISCARD_DESCRIPTOR = descriptor(
+  'discard',
   Object.freeze([
     jsonParameter('sessionId', SESSION_ID_CODEC),
     jsonParameter('itemId', ITEM_ID_CODEC),
@@ -281,7 +281,7 @@ export const MESSAGE_QUEUE_INVOCATIONS: readonly InvocationDescriptor[] = Object
   QUEUE_STATE_DESCRIPTOR,
   QUEUE_MOVE_DESCRIPTOR,
   QUEUE_EDIT_DESCRIPTOR,
-  QUEUE_REMOVE_DESCRIPTOR,
+  QUEUE_DISCARD_DESCRIPTOR,
   QUEUE_STEER_DESCRIPTOR,
   QUEUE_PAUSE_DESCRIPTOR,
   QUEUE_RESUME_DESCRIPTOR,

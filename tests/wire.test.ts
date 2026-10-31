@@ -21,7 +21,7 @@ describe('invocation descriptors', () => {
       'state',
       'move',
       'edit',
-      'remove',
+      'discard',
       'steer',
       'pause',
       'resume',
@@ -44,6 +44,20 @@ describe('invocation descriptors', () => {
     ])
     const edit = MESSAGE_QUEUE_INVOCATIONS.find(item => item.method === 'edit')
     expect(edit?.parameters.map(parameter => parameter.name)).toEqual(['sessionId', 'itemId', 'text'])
+  })
+
+  it('avoids method names reserved by the client Remote namespace service', () => {
+    // packages/api/gateway/src/client/index.ts: a contribution method colliding
+    // with REMOTE_NAMESPACE_FIELDS, RemoteNamespaceService.prototype, or the
+    // inherited Object surface makes $mount throw and the client entry fail.
+    const reserved = new Set([
+      ...Object.getOwnPropertyNames(Object.prototype),
+      'ctx', 'empty', 'invokeRemote', 'methods', 'name', 'namespace',
+      'assertMethodAvailable', 'has', 'installDirect', 'installScoped', 'install', 'remove',
+    ])
+    for (const descriptor of MESSAGE_QUEUE_INVOCATIONS) {
+      expect(reserved.has(descriptor.method), `reserved Remote method: ${descriptor.method}`).toBe(false)
+    }
   })
 
   it('keeps descriptor results strict', () => {

@@ -126,12 +126,12 @@ export class MessageQueueService extends TypertRemoteService {
   }
 
   /**
-   * Remove one held item.
+   * Discard one held item.
    * @param sessionId - Session identity.
    * @param itemId - identity of the held row.
    * @returns the queued state after the removal.
    */
-  remove(sessionId: string, itemId: string): QueueState {
+  discard(sessionId: string, itemId: string): QueueState {
     const agent = this.requireAgent(sessionId)
     const state = this.gates.get(agent.id)
     try {

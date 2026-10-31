@@ -77,6 +77,11 @@ pnpm check       # typecheck + lint + test
 The browser bundle is wrapped in `window.__ModuleLoader__.load({ id, factory })` by
 `scripts/build-client.mjs`; its `id` is the package name.
 
+After changing the Typert manifest (adding or renaming an invocation), restart the host
+process. The typert loader caches each package's imported manifest for the lifetime of the
+process, so reloading the plugin alone serves a new browser bundle against the old Host
+manifest.
+
 ## License
 
 MIT

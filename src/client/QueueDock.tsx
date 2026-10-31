@@ -468,7 +468,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                     <button type="button" className="mq-action" aria-label={t('remove')} title={t('remove')}
                       disabled={rowBusy}
                       onClick={() => {
-                        if (isParked) void runHeld(row.id, () => queue.remove(row.id), t('removeFailed'))
+                        if (isParked) void runHeld(row.id, () => queue.discard(row.id), t('removeFailed'))
                         else void runAction(row.id, { kind: 'remove' }, t('removeFailed'))
                       }}>
                       <TrashIcon />
