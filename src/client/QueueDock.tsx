@@ -162,6 +162,8 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
 
   const queued = inbox?.['next-turn'] ?? EMPTY_ITEMS
   const [remoteState, setRemoteState] = useState<QueueState | undefined>(undefined)
+  const [stateAt, setStateAt] = useState(0)
+  const [clock, setClock] = useState(0)
   const [localOrder, setLocalOrder] = useState<readonly string[] | undefined>(undefined)
   const [editing, setEditing] = useState<{ id: string; text: string; kind: QueueRow['kind'] } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -173,7 +175,10 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const rowsRef = useRef<readonly QueueRow[]>([])
 
   const refresh = useCallback((): void => {
-    void queue.state().then(setRemoteState, () => {
+    void queue.state().then(state => {
+      setRemoteState(state)
+      setStateAt(Date.now())
+    }, () => {
       /* state reads are advisory; the panel still renders the projection */
     })
   }, [queue])
@@ -224,11 +229,22 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }, [pendingSubmissions, queued])
 
   const sentItems = remoteState?.sent ?? EMPTY_SENT
+  const clockMs = Math.max(clock, stateAt)
+  const sentRows = sentItems.flatMap(item => {
+    const remaining = item.remainingMs - Math.max(0, clockMs - stateAt)
+    return remaining > 0 ? [{ item, remaining }] : []
+  })
+
+  useEffect(() => {
+    if (sentItems.length === 0) return
+    const timer = setInterval(() => { setClock(Date.now()) }, 1000)
+    return () => { clearInterval(timer) }
+  }, [sentItems.length])
   const rowCount = displayRows.length + pendingQueue.length
   const paused = remoteState?.paused === true
   const interactionActive = queueMutable && (editing !== null || busy !== null || draggingId !== null)
   const expanded = !collapsed || interactionActive
-  const listVisible = rowCount === 0 || sentItems.length > 0 ? true : rowCount === 1 || expanded
+  const listVisible = rowCount === 0 || sentRows.length > 0 ? true : rowCount === 1 || expanded
   const pauseAvailable = remoteState?.available !== false
 
   useEffect(() => {
@@ -422,9 +438,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     void commitMove(row.id, target)
   }
 
-  if (rowCount === 0 && sentItems.length === 0 && !paused) return null
+  if (rowCount === 0 && sentRows.length === 0 && !paused) return null
 
-  if (rowCount === 0 && sentItems.length === 0) {
+  if (rowCount === 0 && sentRows.length === 0) {
     return (
       <div className="mq-dock">
         <div className="mq-panel">
@@ -461,7 +477,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
             <span className="mq-lead"><QueueIcon /></span>
             <span className="mq-count">
               {rowCount === 0
-                ? t('sentTitle', { n: sentItems.length })
+                ? t('sentTitle', { n: sentRows.length })
                 : paused ? t('paused', { n: rowCount }) : t('count', { n: rowCount })}
             </span>
             {!listVisible && pendingQueue.length > 0 && <span className="mq-status">{t('sending')}</span>}
@@ -586,13 +602,14 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
               <span className="mq-status" role="status">{t('sending')}</span>
             </li>
           ))}
-          {listVisible && sentItems.map(item => (
+          {listVisible && sentRows.map(({ item, remaining }) => (
             <li key={`sent:${item.id}`} className="mq-row mq-sent-row" data-mq-row="" data-sent="">
               <span className="mq-badge" aria-hidden><UndoIcon /></span>
               <Attachments content={item.content} loadImage={loadImage} t={t} />
               <Preview content={item.content} t={t} />
               <span className="mq-status">
                 {item.delivered ? t('sentDelivered') : t('sentPending')} · {t('sentTurn', { n: item.turn })}
+                {' · '}{t('revokeWindow', { n: Math.max(1, Math.ceil(remaining / 1000)) })}
               </span>
               <span className="mq-actions">
                 <button type="button" className="mq-action" aria-label={t('revoke')} title={t('revoke')}

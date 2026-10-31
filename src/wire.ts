@@ -18,6 +18,9 @@ export const MESSAGE_QUEUE_PACKAGE = 'dsh-message-queue'
 /** Cordis service key and Typert wire namespace. */
 export const MESSAGE_QUEUE_NAMESPACE = 'messageQueue'
 
+/** How long after a message leaves the queue it can still be withdrawn. */
+export const REVOKE_WINDOW_MS = 15_000
+
 /** One queue item held by the plugin while its Session is paused. */
 export interface ParkedItem {
   /** Message identity in the owning Session. */
@@ -41,6 +44,8 @@ export interface SentItem {
   readonly turn: number
   /** Whether the message already entered the model-visible surface. */
   readonly delivered: boolean
+  /** Remaining withdrawal time in milliseconds, measured at projection time. */
+  readonly remainingMs: number
 }
 
 /** Observable state of one Session's queue. */
@@ -118,6 +123,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'message-queue/steer-unavailable': { readonly sessionId: string; readonly itemId: string }
     /** A held item edit carried no non-whitespace text. */
     'message-queue/invalid-content': { readonly sessionId: string; readonly itemId: string }
+    /** The withdrawal window for a sent message has closed. */
+    'message-queue/revoke-expired': { readonly sessionId: string; readonly itemId: string }
   }
 }
 
@@ -180,11 +187,15 @@ export const SENT_ITEM_SCHEMA: TypertSchema = {
     if (!Array.isArray(content)) invalid('sentItem.content', 'an array')
     if (typeof value.turn !== 'number' || !Number.isSafeInteger(value.turn)) invalid('sentItem.turn', 'a safe integer')
     if (typeof value.delivered !== 'boolean') invalid('sentItem.delivered', 'a boolean')
+    if (typeof value.remainingMs !== 'number' || !Number.isSafeInteger(value.remainingMs)) {
+      invalid('sentItem.remainingMs', 'a safe integer')
+    }
     return {
       id: readId(value.id, 'sentItem.id'),
       content,
       turn: value.turn,
       delivered: value.delivered,
+      remainingMs: value.remainingMs,
     }
   },
 }

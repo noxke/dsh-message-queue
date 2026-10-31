@@ -201,7 +201,7 @@ describe('plugin mounting', () => {
 
     ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('a'), turn: 3 })
     expect(service.state('session-1').sent).toEqual([
-      { id: 'a', content: [{ type: 'text', text: 'a' }], turn: 3, delivered: false },
+      expect.objectContaining({ id: 'a', turn: 3, delivered: false }),
     ])
 
     fake.status = 'idle'

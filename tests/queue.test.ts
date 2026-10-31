@@ -25,6 +25,7 @@ import {
   recordClaimedItem,
   recordDeliveredItem,
   REVOKED_NOTICE,
+  RevokeExpiredError,
   revokeSentItem,
   releaseQueueGate,
   removeHeldItem,
@@ -333,6 +334,24 @@ describe('revocation', () => {
     expect(fake.inbox.nextTurn).toEqual([])
     expect(state.held[0]?.reason).toBe('global')
     expect(String(state.held[0]?.message.id)).not.toBe('a')
+  })
+
+  it('rejects a withdrawal after the window closes', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a'), 1, 1_000)
+    expect(() => revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE, 16_000))
+      .toThrow(RevokeExpiredError)
+    expect(fake.inbox.nextTurn).toEqual([])
+    expect(state.sent).toHaveLength(1)
+  })
+
+  it('drops expired sent rows from the projection', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a'), 1, 1_000)
+    expect(readQueueState(fake.agent, state, 2_000).sent).toHaveLength(1)
+    expect(readQueueState(fake.agent, state, 20_000).sent).toHaveLength(0)
   })
 
   it('rejects revoking an item outside the recent list', () => {

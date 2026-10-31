@@ -11,6 +11,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionSeq } from '@deepseek-ai/dsh-session'
+import { REVOKE_WINDOW_MS } from './wire.ts'
 import type { ParkedItem, QueueOrder, QueueState, SentItem } from './wire.ts'
 
 /** Why an item is held: an explicit per-item pause or the queue-wide pause. */
@@ -33,6 +34,8 @@ export interface SentRecord {
   readonly turn: number
   /** Log seq of the message's model-visible `user/message` event, or null. */
   seq: number | null
+  /** Wall-clock time the message left the queue. */
+  readonly claimedAt: number
 }
 
 /** Model-facing text that replaces a withdrawn message in future requests. */
@@ -105,24 +108,42 @@ export function visibleOrder(agent: Agent, state: QueueGateState | undefined): s
  * @param state - per-Session pause state, absent when nothing is paused.
  * @returns the wire projection of the queue.
  */
-export function readQueueState(agent: Agent, state: QueueGateState | undefined): QueueState {
+export function readQueueState(
+  agent: Agent,
+  state: QueueGateState | undefined,
+  now: number = Date.now(),
+): QueueState {
   return {
     available: true,
     paused: state?.globalPaused === true,
     parked: (state?.held ?? []).map(parkedItemOf),
     order: visibleOrder(agent, state),
-    sent: (state?.sent ?? []).map(sentItemOf),
+    sent: (state?.sent ?? [])
+      .map(record => sentItemOf(record, now))
+      .filter((item): item is SentItem => item !== undefined),
   }
 }
 
-/** Project one sent record to its wire item. */
-function sentItemOf(record: SentRecord): SentItem {
+/** Project one sent record to its wire item while its window is open. */
+function sentItemOf(record: SentRecord, now: number): SentItem | undefined {
+  const remainingMs = REVOKE_WINDOW_MS - (now - record.claimedAt)
+  if (remainingMs <= 0) return undefined
   return {
     id: String(record.message.id),
     content: record.message.content as unknown as unknown[],
     turn: record.turn,
     delivered: record.seq !== null,
+    remainingMs,
   }
+}
+
+/**
+ * Drop sent records whose withdrawal window has closed.
+ * @param state - per-Session queue state.
+ * @param now - wall-clock time to measure against.
+ */
+export function dropExpiredSent(state: QueueGateState, now: number = Date.now()): void {
+  state.sent = state.sent.filter(record => now - record.claimedAt < REVOKE_WINDOW_MS)
 }
 
 /**
@@ -131,8 +152,13 @@ function sentItemOf(record: SentRecord): SentItem {
  * @param message - claimed message.
  * @param turn - turn that claimed it.
  */
-export function recordClaimedItem(state: QueueGateState, message: UserMessage, turn: number): void {
-  state.sent.push({ message, turn, seq: null })
+export function recordClaimedItem(
+  state: QueueGateState,
+  message: UserMessage,
+  turn: number,
+  claimedAt: number = Date.now(),
+): void {
+  state.sent.push({ message, turn, seq: null, claimedAt })
   while (state.sent.length > MAX_SENT_ITEMS) state.sent.shift()
 }
 
@@ -179,10 +205,13 @@ export function revokeSentItem(
   state: QueueGateState,
   itemId: string,
   notice: string,
+  now: number = Date.now(),
 ): 'requeued' | 'replaced' {
   const index = state.sent.findIndex(item => String(item.message.id) === itemId)
   if (index < 0) throw new ItemNotFoundError()
-  const record = state.sent.splice(index, 1)[0] as SentRecord
+  const record = state.sent[index] as SentRecord
+  if (now - record.claimedAt >= REVOKE_WINDOW_MS) throw new RevokeExpiredError()
+  state.sent.splice(index, 1)
   if (record.seq === null) {
     requeueMessage(agent, state, record.message)
     return 'requeued'
@@ -246,6 +275,14 @@ export class ItemNotFoundError extends Error {
   constructor() {
     super('queue item is no longer pending')
     this.name = 'ItemNotFoundError'
+  }
+}
+
+/** Raised when a withdrawal arrives after its window closed. */
+export class RevokeExpiredError extends Error {
+  constructor() {
+    super('withdrawal window has closed')
+    this.name = 'RevokeExpiredError'
   }
 }
 

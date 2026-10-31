@@ -14,6 +14,7 @@ import {
   ItemNotFoundError,
   SteerUnavailableError,
   createQueueGateState,
+  dropExpiredSent,
   editHeldItem,
   isIdleState,
   moveQueueRow,
@@ -24,6 +25,7 @@ import {
   recordClaimedItem,
   recordDeliveredItem,
   REVOKED_NOTICE,
+  RevokeExpiredError,
   revokeSentItem,
   pauseOneItem,
   readQueueState,
@@ -68,6 +70,7 @@ export class MessageQueueService extends TypertRemoteService {
       })
       const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
         const state = this.gateState(agent.id)
+        dropExpiredSent(state)
         noteClaimedItem(state, message.id)
         recordClaimedItem(state, message, turn)
       })
@@ -114,6 +117,11 @@ export class MessageQueueService extends TypertRemoteService {
   state(sessionId: string): QueueState {
     const agent = this.agentOf(sessionId)
     if (agent === undefined) return UNAVAILABLE
+    const state = this.gates.get(agent.id)
+    if (state !== undefined) {
+      dropExpiredSent(state)
+      this.prune(agent)
+    }
     return readQueueState(agent, this.gates.get(agent.id))
   }
 
@@ -331,6 +339,13 @@ export class MessageQueueService extends TypertRemoteService {
       return new RemoteError(
         'message-queue/steer-unavailable',
         'no running turn accepts steering',
+        { sessionId, itemId },
+      )
+    }
+    if (error instanceof RevokeExpiredError) {
+      return new RemoteError(
+        'message-queue/revoke-expired',
+        'the withdrawal window for this message has closed',
         { sessionId, itemId },
       )
     }

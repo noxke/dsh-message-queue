@@ -80,13 +80,13 @@ describe('strict codecs', () => {
       paused: true,
       parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
-      sent: [{ id: 's', content: [], turn: 2, delivered: true }],
+      sent: [{ id: 's', content: [], turn: 2, delivered: true, remainingMs: 9000 }],
     })).toEqual({
       available: true,
       paused: true,
       parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
-      sent: [{ id: 's', content: [], turn: 2, delivered: true }],
+      sent: [{ id: 's', content: [], turn: 2, delivered: true, remainingMs: 9000 }],
     })
     expect(() => codec.create().parse({ available: true, paused: 'yes', parked: [], order: [] })).toThrow()
   })

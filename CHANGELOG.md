@@ -11,8 +11,9 @@
   remove them, and send one into a running turn.
 - Drag the row itself: it follows the pointer every frame and the list closes the gap.
 - Match the built-in queue strip's layout, type scale, and hover states.
-- Withdraw recent sends from the panel: undelivered messages return to the queue, delivered
-  messages gain a model-visible withdrawal replacement and their text rejoins the queue.
+- Withdraw a send within 15 seconds from the panel: undelivered messages return to the queue,
+  delivered messages gain a model-visible withdrawal replacement and their text rejoins the
+  queue. The row shows the remaining window and disappears once it closes.
 - Add pause/resume: the running turn finishes, later queued messages stay queued until
   resume, and items submitted while paused are not claimed.
 - Keep the built-in edit, remove, and send-now (steer) actions on queued rows.
