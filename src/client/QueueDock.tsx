@@ -162,6 +162,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const queueMutable = subagent == null || subagent.address?.mode === 'continuable'
 
   const queued = inbox?.['next-turn'] ?? EMPTY_ITEMS
+  const steeringProjected = inbox?.['next-step'] ?? EMPTY_ITEMS
   const [remoteState, setRemoteState] = useState<QueueState | undefined>(undefined)
   const [stateAt, setStateAt] = useState(0)
   const [clock, setClock] = useState(0)
@@ -186,6 +187,18 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }, [queue])
 
   useEffect(() => { refresh() }, [refresh, sessionId])
+  // Steering rows are the inbox projection; refresh the host snapshot too so
+  // sent rows appear as soon as an inbox item is claimed or admitted.
+  const nextStepKey = steeringProjected.map(item => item.id).join(',')
+  const nextTurnKey = queued.map(item => item.id).join(',')
+  useEffect(() => {
+    refresh()
+  }, [nextStepKey, nextTurnKey, refresh])
+  useEffect(() => {
+    if (!running) return
+    const timer = setInterval(() => { refresh() }, 2000)
+    return () => { clearInterval(timer) }
+  }, [refresh, running])
   useEffect(() => {
     const onFocus = (): void => { refresh() }
     window.addEventListener('focus', onFocus)
@@ -231,7 +244,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }, [pendingSubmissions, queued])
 
   const sentItems = remoteState?.sent ?? EMPTY_SENT
-  const steeringItems = remoteState?.steering ?? EMPTY_STEERING
+  // The projection is the live source; the host snapshot is the fallback while
+  // the projection has not loaded yet.
+  const steeringItems = inbox === undefined ? (remoteState?.steering ?? EMPTY_STEERING) : steeringProjected
   const clockMs = Math.max(clock, stateAt)
   const sentRows = sentItems.flatMap(item => {
     const remaining = item.remainingMs - Math.max(0, clockMs - stateAt)
