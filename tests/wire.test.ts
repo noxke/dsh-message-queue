@@ -23,6 +23,7 @@ describe('invocation descriptors', () => {
       'edit',
       'discard',
       'steer',
+      'revoke',
       'pauseItem',
       'resumeItem',
       'pause',
@@ -79,11 +80,13 @@ describe('strict codecs', () => {
       paused: true,
       parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
+      sent: [{ id: 's', content: [], turn: 2, delivered: true }],
     })).toEqual({
       available: true,
       paused: true,
       parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
+      sent: [{ id: 's', content: [], turn: 2, delivered: true }],
     })
     expect(() => codec.create().parse({ available: true, paused: 'yes', parked: [], order: [] })).toThrow()
   })
@@ -100,7 +103,7 @@ describe('strict codecs', () => {
 
   it('exposes the order schema the Host returns', () => {
     expect(QUEUE_ORDER_SCHEMA.parse({ order: ['a', 'b'] })).toEqual({ order: ['a', 'b'] })
-    expect(QUEUE_STATE_SCHEMA.parse({ available: false, paused: false, parked: [], order: [] }))
-      .toEqual({ available: false, paused: false, parked: [], order: [] })
+    expect(QUEUE_STATE_SCHEMA.parse({ available: false, paused: false, parked: [], order: [], sent: [] }))
+      .toEqual({ available: false, paused: false, parked: [], order: [], sent: [] })
   })
 })

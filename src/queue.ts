@@ -10,7 +10,8 @@ import { randomUUID } from 'node:crypto'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import type { ParkedItem, QueueOrder, QueueState } from './wire.ts'
+import type { SessionSeq } from '@deepseek-ai/dsh-session'
+import type { ParkedItem, QueueOrder, QueueState, SentItem } from './wire.ts'
 
 /** Why an item is held: an explicit per-item pause or the queue-wide pause. */
 export type PauseReason = 'manual' | 'global'
@@ -23,6 +24,20 @@ export interface HeldItem {
   readonly anchor: string | null
 }
 
+/** Recent sent messages kept for withdrawal, newest last. */
+const MAX_SENT_ITEMS = 5
+
+/** One recently sent message plus the surface seq it landed at, when known. */
+export interface SentRecord {
+  readonly message: UserMessage
+  readonly turn: number
+  /** Log seq of the message's model-visible `user/message` event, or null. */
+  seq: number | null
+}
+
+/** Model-facing text that replaces a withdrawn message in future requests. */
+export const REVOKED_NOTICE = 'The user withdrew their previous message. Disregard its content and do not act on it.'
+
 /** Per-Session pause state owned by the plugin while a queue or item is paused. */
 export interface QueueGateState {
   /** Whether the queue-wide pause holds automatic sending. */
@@ -34,18 +49,32 @@ export interface QueueGateState {
   gateOpen: boolean
   /** Held item whose explicit resume must claim the next turn despite the pause. */
   bypass: string | null
+  /** Recently sent messages the panel can still withdraw. */
+  sent: SentRecord[]
   /** Reentrancy guard around splices this module performs itself. */
   mutating: boolean
 }
 
 /** Create the empty pause state for one Session. */
 export function createQueueGateState(): QueueGateState {
-  return { globalPaused: false, held: [], release: undefined, gateOpen: false, bypass: null, mutating: false }
+  return {
+    globalPaused: false,
+    held: [],
+    release: undefined,
+    gateOpen: false,
+    bypass: null,
+    sent: [],
+    mutating: false,
+  }
 }
 
 /** Whether the state holds nothing and holds no gate. */
 export function isIdleState(state: QueueGateState): boolean {
-  return !state.globalPaused && state.held.length === 0 && !state.gateOpen && state.bypass === null
+  return !state.globalPaused
+    && state.held.length === 0
+    && !state.gateOpen
+    && state.bypass === null
+    && state.sent.length === 0
 }
 
 /** Project one live message to its wire queue item. */
@@ -82,7 +111,100 @@ export function readQueueState(agent: Agent, state: QueueGateState | undefined):
     paused: state?.globalPaused === true,
     parked: (state?.held ?? []).map(parkedItemOf),
     order: visibleOrder(agent, state),
+    sent: (state?.sent ?? []).map(sentItemOf),
   }
+}
+
+/** Project one sent record to its wire item. */
+function sentItemOf(record: SentRecord): SentItem {
+  return {
+    id: String(record.message.id),
+    content: record.message.content as unknown as unknown[],
+    turn: record.turn,
+    delivered: record.seq !== null,
+  }
+}
+
+/**
+ * Remember one message a turn just claimed.
+ * @param state - per-Session queue state.
+ * @param message - claimed message.
+ * @param turn - turn that claimed it.
+ */
+export function recordClaimedItem(state: QueueGateState, message: UserMessage, turn: number): void {
+  state.sent.push({ message, turn, seq: null })
+  while (state.sent.length > MAX_SENT_ITEMS) state.sent.shift()
+}
+
+/**
+ * Mark a sent message as model-visible once its `user/message` event lands.
+ * @param state - per-Session queue state.
+ * @param messageId - identity of the delivered message.
+ * @param seq - log seq of the model-visible message event.
+ */
+export function recordDeliveredItem(state: QueueGateState, messageId: MessageId, seq: number): void {
+  const record = state.sent.findLast(item => item.seq === null && item.message.id === messageId)
+  if (record !== undefined) record.seq = seq
+}
+
+/** Put one message back at the front of the queue (or the held set while paused). */
+function requeueMessage(agent: Agent, state: QueueGateState, message: UserMessage): void {
+  if (state.globalPaused) {
+    state.held.push({ message, reason: 'global', anchor: null })
+    return
+  }
+  state.mutating = true
+  try {
+    agent.inbox.splice('next-turn', 0, 0, [message])
+  } finally {
+    state.mutating = false
+  }
+  wakeQueue(agent, state)
+}
+
+/**
+ * Withdraw one recently sent message.
+ * Undelivered messages return to the queue unchanged. Delivered messages gain a
+ * model-visible replacement that tells the model the text was withdrawn, then
+ * their content returns to the queue as a fresh message.
+ * @param agent - Agent owning the queue.
+ * @param state - per-Session queue state holding the sent record.
+ * @param itemId - identity of the sent message.
+ * @param notice - model-facing withdrawal text.
+ * @returns how the message was withdrawn.
+ * @throws {@link ItemNotFoundError} when the message is not in the recent list.
+ */
+export function revokeSentItem(
+  agent: Agent,
+  state: QueueGateState,
+  itemId: string,
+  notice: string,
+): 'requeued' | 'replaced' {
+  const index = state.sent.findIndex(item => String(item.message.id) === itemId)
+  if (index < 0) throw new ItemNotFoundError()
+  const record = state.sent.splice(index, 1)[0] as SentRecord
+  if (record.seq === null) {
+    requeueMessage(agent, state, record.message)
+    return 'requeued'
+  }
+  const seq = record.seq as unknown as SessionSeq
+  const replacement: UserMessage = {
+    id: randomUUID() as unknown as MessageId,
+    role: 'user',
+    content: [{ type: 'text', text: notice }],
+    source: { kind: 'runtime-context' } as unknown as UserMessage['source'],
+  }
+  agent.session.append('user/message', replacement, {
+    surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
+    sourceEventSeqs: [seq],
+  })
+  const requeued: UserMessage = {
+    ...record.message,
+    id: randomUUID() as unknown as MessageId,
+    source: { kind: 'user' } as UserMessage['source'],
+  }
+  requeueMessage(agent, state, requeued)
+  return 'replaced'
 }
 
 /**

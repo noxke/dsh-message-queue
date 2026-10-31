@@ -30,10 +30,12 @@ import {
   QueueIcon,
   SendIcon,
   TrashIcon,
+  UndoIcon,
 } from './icons.tsx'
 
 const EMPTY_ITEMS: readonly InboxItem[] = []
 const EMPTY_PARKED: QueueState['parked'] = []
+const EMPTY_SENT: QueueState['sent'] = []
 /** Distance from a list edge that starts auto-scrolling during a drag. */
 const AUTOSCROLL_EDGE_PX = 24
 
@@ -221,11 +223,12 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
       && !admitted.has(submission.requestId))
   }, [pendingSubmissions, queued])
 
+  const sentItems = remoteState?.sent ?? EMPTY_SENT
   const rowCount = displayRows.length + pendingQueue.length
   const paused = remoteState?.paused === true
   const interactionActive = queueMutable && (editing !== null || busy !== null || draggingId !== null)
   const expanded = !collapsed || interactionActive
-  const listVisible = rowCount === 1 || expanded
+  const listVisible = rowCount === 0 || sentItems.length > 0 ? true : rowCount === 1 || expanded
   const pauseAvailable = remoteState?.available !== false
 
   useEffect(() => {
@@ -419,9 +422,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     void commitMove(row.id, target)
   }
 
-  if (rowCount === 0 && !paused) return null
+  if (rowCount === 0 && sentItems.length === 0 && !paused) return null
 
-  if (rowCount === 0) {
+  if (rowCount === 0 && sentItems.length === 0) {
     return (
       <div className="mq-dock">
         <div className="mq-panel">
@@ -456,13 +459,17 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
           <button type="button" className="mq-toggle" aria-controls="mq-list" aria-expanded={listVisible}
             disabled={rowCount === 1 || interactionActive} onClick={() => { setCollapsed(value => !value) }}>
             <span className="mq-lead"><QueueIcon /></span>
-            <span className="mq-count">{paused ? t('paused', { n: rowCount }) : t('count', { n: rowCount })}</span>
+            <span className="mq-count">
+              {rowCount === 0
+                ? t('sentTitle', { n: sentItems.length })
+                : paused ? t('paused', { n: rowCount }) : t('count', { n: rowCount })}
+            </span>
             {!listVisible && pendingQueue.length > 0 && <span className="mq-status">{t('sending')}</span>}
             <span className="mq-chevron" aria-hidden>
               {listVisible ? <ChevronIcon direction="up" /> : <ChevronIcon direction="down" />}
             </span>
           </button>
-          {queueMutable && (
+          {queueMutable && rowCount > 0 && (
             <button type="button" className="mq-action" aria-label={paused ? t('resumeAll') : t('pauseAll')}
               title={paused ? t('resumeAll') : t('pauseAll')} disabled={busy !== null || !pauseAvailable}
               onClick={() => { void toggleGlobalPause() }}>
@@ -577,6 +584,23 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
               <PendingAttachments attachments={submission.attachments} />
               <span className="mq-preview">{submission.text}</span>
               <span className="mq-status" role="status">{t('sending')}</span>
+            </li>
+          ))}
+          {listVisible && sentItems.map(item => (
+            <li key={`sent:${item.id}`} className="mq-row mq-sent-row" data-mq-row="" data-sent="">
+              <span className="mq-badge" aria-hidden><UndoIcon /></span>
+              <Attachments content={item.content} loadImage={loadImage} t={t} />
+              <Preview content={item.content} t={t} />
+              <span className="mq-status">
+                {item.delivered ? t('sentDelivered') : t('sentPending')} · {t('sentTurn', { n: item.turn })}
+              </span>
+              <span className="mq-actions">
+                <button type="button" className="mq-action" aria-label={t('revoke')} title={t('revoke')}
+                  disabled={busy !== null}
+                  onClick={() => { void runState(item.id, () => queue.revoke(item.id), t('revokeFailed')) }}>
+                  <UndoIcon />
+                </button>
+              </span>
             </li>
           ))}
         </ul>

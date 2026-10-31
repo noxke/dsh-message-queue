@@ -88,6 +88,16 @@ export function SendIcon(): ReactElement {
   )
 }
 
+/** Withdraw / undo control. */
+export function UndoIcon(): ReactElement {
+  return (
+    <Icon>
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h9.5a6.5 6.5 0 0 1 0 13H8" />
+    </Icon>
+  )
+}
+
 /** Confirm control. */
 export function CheckIcon(): ReactElement {
   return <Icon><path d="m5 12.5 4.5 4.5L19 7" /></Icon>

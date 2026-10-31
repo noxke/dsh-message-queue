@@ -50,6 +50,11 @@ dsh plugin --profile <profile> add link:"$PWD"
   (`conversation.input.dock`, id `queue`) with a lower priority, so it renders instead of
   the built-in queue strip and steps aside when the plugin is disabled.
 
+- **Withdraw a recent send.** The panel lists the last five messages the queue sent. Withdrawing
+  one puts its text back at the front of the queue. A message the model has not seen yet returns
+  unchanged; one the model already saw gains a model-visible replacement that says the user
+  withdrew it, while the chat transcript keeps the original text.
+
 ## Limits
 
 - The panel covers the main Conversation view. Sessions owned by a subagent route render
@@ -63,6 +68,8 @@ dsh plugin --profile <profile> add link:"$PWD"
   rest of the list closes the gap; releasing commits the final index once.
 - Rows reorder inside their own group: held rows first, queued rows after them.
 - Steering input (`next-step`) is not listed by the panel.
+- Withdrawal covers the last five messages this queue claimed. The window between claiming a
+  message and its delivery to the model is short, so that branch is best-effort.
 - Pause state is written per Session and refreshed on mount, on window focus, and every
   few seconds while paused; two browser tabs converge on the host answer.
 

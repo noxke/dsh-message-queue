@@ -31,6 +31,18 @@ export interface ParkedItem {
   readonly reason: 'manual' | 'global'
 }
 
+/** One message the queue already sent to the model, revocable while it is recent. */
+export interface SentItem {
+  /** Identity of the sent message. */
+  readonly id: string
+  /** Model-facing content blocks, JSON-safe. */
+  readonly content: readonly unknown[]
+  /** Turn that claimed the message. */
+  readonly turn: number
+  /** Whether the message already entered the model-visible surface. */
+  readonly delivered: boolean
+}
+
 /** Observable state of one Session's queue. */
 export interface QueueState {
   /** Whether a live Agent exists for this Session. */
@@ -41,6 +53,8 @@ export interface QueueState {
   readonly parked: readonly ParkedItem[]
   /** Visible queue order: parked ids followed by `next-turn` ids. */
   readonly order: readonly string[]
+  /** Recently sent messages, newest last. */
+  readonly sent: readonly SentItem[]
 }
 
 /** New `next-turn` order after one move. */
@@ -65,6 +79,8 @@ export interface MessageQueueRemote {
   pauseItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Restore one held item; under a queue-wide pause this sends it immediately. */
   resumeItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
+  /** Withdraw one recently sent message and return its text to the queue. */
+  revoke(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Pause the queue; every queued item is held until a queue-wide resume. */
   pause(sessionId: string): Promise<RemoteResult<QueueState>>
   /** Resume claiming and restore parked items at the front of the queue. */
@@ -88,6 +104,7 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'messageQueue/steer': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/pauseItem': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/resumeItem': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
+    'messageQueue/revoke': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/pause': (sessionId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/resume': (sessionId: string) => Promise<RemoteResult<QueueState>>
   }
@@ -126,6 +143,12 @@ function readIndex(value: unknown, path: string): number {
   return value
 }
 
+/** Read an array value. */
+function readArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) invalid(path, 'an array')
+  return value
+}
+
 /** Read an array of non-empty identity strings. */
 function readIdArray(value: unknown, path: string): string[] {
   if (!Array.isArray(value)) invalid(path, 'an array')
@@ -149,6 +172,23 @@ export const PARKED_ITEM_SCHEMA: TypertSchema = {
   },
 }
 
+/** Strict validator of one sent item. */
+export const SENT_ITEM_SCHEMA: TypertSchema = {
+  parse(value: unknown): SentItem {
+    if (!isRecord(value)) invalid('sentItem', 'an object')
+    const content = value.content
+    if (!Array.isArray(content)) invalid('sentItem.content', 'an array')
+    if (typeof value.turn !== 'number' || !Number.isSafeInteger(value.turn)) invalid('sentItem.turn', 'a safe integer')
+    if (typeof value.delivered !== 'boolean') invalid('sentItem.delivered', 'a boolean')
+    return {
+      id: readId(value.id, 'sentItem.id'),
+      content,
+      turn: value.turn,
+      delivered: value.delivered,
+    }
+  },
+}
+
 /** Strict validator of {@link QueueState}. */
 export const QUEUE_STATE_SCHEMA: TypertSchema = {
   parse(value: unknown): QueueState {
@@ -162,6 +202,7 @@ export const QUEUE_STATE_SCHEMA: TypertSchema = {
       paused: value.paused,
       parked: parked.map((item, index) => readParkedItem(item, `queueState.parked[${index}]`)),
       order: readIdArray(value.order, 'queueState.order'),
+      sent: readArray(value.sent, 'queueState.sent').map(item => SENT_ITEM_SCHEMA.parse(item) as SentItem),
     }
   },
 }
@@ -269,6 +310,16 @@ export const QUEUE_STEER_DESCRIPTOR = descriptor(
   STATE_RESULT_CODEC,
 )
 
+/** The `messageQueue/revoke` invocation. */
+export const QUEUE_REVOKE_DESCRIPTOR = descriptor(
+  'revoke',
+  Object.freeze([
+    jsonParameter('sessionId', SESSION_ID_CODEC),
+    jsonParameter('itemId', ITEM_ID_CODEC),
+  ]),
+  STATE_RESULT_CODEC,
+)
+
 /** The `messageQueue/pauseItem` invocation. */
 export const QUEUE_PAUSE_ITEM_DESCRIPTOR = descriptor(
   'pauseItem',
@@ -313,6 +364,7 @@ export const MESSAGE_QUEUE_INVOCATIONS: readonly InvocationDescriptor[] = Object
   QUEUE_EDIT_DESCRIPTOR,
   QUEUE_DISCARD_DESCRIPTOR,
   QUEUE_STEER_DESCRIPTOR,
+  QUEUE_REVOKE_DESCRIPTOR,
   QUEUE_PAUSE_ITEM_DESCRIPTOR,
   QUEUE_RESUME_ITEM_DESCRIPTOR,
   QUEUE_PAUSE_DESCRIPTOR,

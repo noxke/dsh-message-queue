@@ -130,6 +130,7 @@ export interface QueueDockInjected {
     steer(itemId: string): Promise<import('../wire.ts').QueueState>
     pauseItem(itemId: string): Promise<import('../wire.ts').QueueState>
     resumeItem(itemId: string): Promise<import('../wire.ts').QueueState>
+    revoke(itemId: string): Promise<import('../wire.ts').QueueState>
     pause(): Promise<import('../wire.ts').QueueState>
     resume(): Promise<import('../wire.ts').QueueState>
   }

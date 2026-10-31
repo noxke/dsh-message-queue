@@ -21,6 +21,10 @@ import {
   parkIncomingItem,
   noteClaimedItem,
   pauseAllItems,
+  recordClaimedItem,
+  recordDeliveredItem,
+  REVOKED_NOTICE,
+  revokeSentItem,
   pauseOneItem,
   readQueueState,
   releaseQueueGate,
@@ -40,6 +44,7 @@ const UNAVAILABLE: QueueState = Object.freeze({
   paused: false,
   parked: Object.freeze([]),
   order: Object.freeze([]),
+  sent: Object.freeze([]),
 })
 
 /** Pending message queue control exposed over the `messageQueue` Typert namespace. */
@@ -61,11 +66,18 @@ export class MessageQueueService extends TypertRemoteService {
           ctx.logger.warn(`message-queue: parking a paused submission failed: ${String(error)}`)
         }
       })
-      const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+      const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+        const state = this.gateState(agent.id)
+        noteClaimedItem(state, message.id)
+        recordClaimedItem(state, message, turn)
+      })
+      const offSessionEvent = ctx.on('session/event', (session, event) => {
+        if (event.type !== 'user/message') return
+        const agent = this.agentOf(session.id)
+        if (agent === undefined) return
         const state = this.gates.get(agent.id)
         if (state === undefined) return
-        noteClaimedItem(state, message.id)
-        this.prune(agent)
+        recordDeliveredItem(state, event.data.id, event.seq)
       })
       const offStatus = ctx.on('agent/status', ({ agent, status }) => {
         if (status !== 'idle') return
@@ -86,6 +98,7 @@ export class MessageQueueService extends TypertRemoteService {
       return () => {
         offInserted()
         offClaimed()
+        offSessionEvent()
         offStatus()
         offDisposed()
         this.restoreAll()
@@ -206,6 +219,25 @@ export class MessageQueueService extends TypertRemoteService {
     const state = this.gates.get(agent.id) ?? createQueueGateState()
     try {
       resumeOneItem(agent, state, itemId)
+    } catch (error: unknown) {
+      throw this.wireError(error, sessionId, itemId)
+    }
+    this.prune(agent)
+    return readQueueState(agent, this.gates.get(agent.id))
+  }
+
+  /**
+   * Withdraw one recently sent message.
+   * @param sessionId - Session identity.
+   * @param itemId - identity of the sent message.
+   * @returns the queue state after the message returned as a queue row.
+   */
+  revoke(sessionId: string, itemId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gates.get(agent.id)
+    try {
+      if (state === undefined) throw new ItemNotFoundError()
+      revokeSentItem(agent, state, itemId, REVOKED_NOTICE)
     } catch (error: unknown) {
       throw this.wireError(error, sessionId, itemId)
     }

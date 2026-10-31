@@ -22,6 +22,10 @@ import {
   noteClaimedItem,
   pauseOneItem,
   readQueueState,
+  recordClaimedItem,
+  recordDeliveredItem,
+  REVOKED_NOTICE,
+  revokeSentItem,
   releaseQueueGate,
   removeHeldItem,
   resumeAllItems,
@@ -49,6 +53,8 @@ interface FakeAgent {
   readonly steered: UserMessage[]
   /** Held maintenance tasks, exposed so tests can release or abort them. */
   readonly maintenance: { count: number; releaseAll: () => void }
+  /** Session append calls recorded for revocation tests. */
+  readonly appended: Array<{ type: string; data: unknown; intent: unknown }>
 }
 
 /**
@@ -68,10 +74,18 @@ function fakeAgent(initial: UserMessage[] = []): FakeAgent {
         for (const release of releases.splice(0)) release()
       },
     },
+    appended: [] as Array<{ type: string; data: unknown; intent: unknown }>,
     agent: undefined as unknown as Agent,
   }
   fake.agent = {
     id: 'session-1' as unknown as SessionId,
+    session: {
+      id: 'session-1' as unknown as SessionId,
+      append(type: string, data: unknown, intent: unknown) {
+        fake.appended.push({ type, data, intent })
+        return { type, data }
+      },
+    },
     get status() { return fake.status },
     inbox: {
       get nextTurn() { return inbox.nextTurn },
@@ -274,6 +288,56 @@ describe('held row operations', () => {
     expect(() => editHeldItem(undefined, 'x', 'y')).toThrow(ItemNotFoundError)
     expect(() => removeHeldItem(undefined, 'x')).toThrow(ItemNotFoundError)
     expect(() => steerHeldItem(fakeAgent().agent, undefined, 'x')).toThrow(ItemNotFoundError)
+  })
+})
+
+describe('revocation', () => {
+  it('returns an undelivered message to the queue unchanged', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a', 'original'), 2)
+    expect(state.sent[0]?.seq).toBeNull()
+    expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('requeued')
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a'])
+    expect(fake.appended).toHaveLength(0)
+    expect(state.sent).toHaveLength(0)
+  })
+
+  it('replaces a delivered message in the model surface and requeues its text', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a', 'original'), 2)
+    recordDeliveredItem(state, 'a' as unknown as MessageId, 17)
+    expect(readQueueState(fake.agent, state).sent[0]?.delivered).toBe(true)
+
+    expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('replaced')
+    expect(fake.appended).toHaveLength(1)
+    expect(fake.appended[0]?.type).toBe('user/message')
+    const intent = fake.appended[0]?.intent as { surfaceOp: { op: string; startSeq: number; endSeq: number } }
+    expect(intent.surfaceOp.op).toBe('replace')
+    expect(Number(intent.surfaceOp.startSeq)).toBe(17)
+    expect(Number(intent.surfaceOp.endSeq)).toBe(17)
+    expect(fake.inbox.nextTurn).toHaveLength(1)
+    const requeued = fake.inbox.nextTurn[0] as UserMessage
+    expect(String(requeued.id)).not.toBe('a')
+    expect(requeued.content).toEqual([{ type: 'text', text: 'original' }])
+  })
+
+  it('holds the requeued text while the queue is paused', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    state.globalPaused = true
+    recordClaimedItem(state, message('a'), 1)
+    recordDeliveredItem(state, 'a' as unknown as MessageId, 3)
+    revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
+    expect(fake.inbox.nextTurn).toEqual([])
+    expect(state.held[0]?.reason).toBe('global')
+    expect(String(state.held[0]?.message.id)).not.toBe('a')
+  })
+
+  it('rejects revoking an item outside the recent list', () => {
+    expect(() => revokeSentItem(fakeAgent().agent, createQueueGateState(), 'missing', REVOKED_NOTICE))
+      .toThrow(ItemNotFoundError)
   })
 })
 

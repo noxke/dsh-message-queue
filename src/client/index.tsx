@@ -63,6 +63,8 @@ function createInjected(scope: ClientScope, sessionId: string): QueueDockInjecte
         unwrap(await remote.pauseItem(sessionId, itemId), 'pauseItem'),
       resumeItem: async (itemId: string): Promise<QueueState> =>
         unwrap(await remote.resumeItem(sessionId, itemId), 'resumeItem'),
+      revoke: async (itemId: string): Promise<QueueState> =>
+        unwrap(await remote.revoke(sessionId, itemId), 'revoke'),
       pause: async (): Promise<QueueState> => unwrap(await remote.pause(sessionId), 'pause'),
       resume: async (): Promise<QueueState> => unwrap(await remote.resume(sessionId), 'resume'),
     },
