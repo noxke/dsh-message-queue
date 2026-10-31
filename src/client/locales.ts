@@ -6,7 +6,6 @@
 
 /** Simplified Chinese dictionary. */
 export const zh = {
-  queue: '队列',
   count: '{n} 条待发',
   sending: '发送中',
   paused: '已暂停 · {n} 条待发',
@@ -14,7 +13,6 @@ export const zh = {
   steeringTitle: '插队待领取 · {n} 条',
   steeringPending: '插队待领取',
   revokeSteering: '撤回插队消息（回到队列）',
-  revoke: '撤回这条插队消息',
   revokeFailed: '撤回消息失败',
   resumeAction: '恢复',
   pauseAll: '暂停队列（全部）',
@@ -29,15 +27,9 @@ export const zh = {
   cancelEdit: '取消',
   remove: '删除',
   steer: '立即发送',
-  steerUnavailable: '当前没有运行中的任务',
   moveUp: '上移',
   moveDown: '下移',
-  moveTop: '移到队首',
-  moveBottom: '移到队尾',
   dragHint: '按住拖动排序',
-  parked: '已暂存',
-  parkedHint: '恢复队列后可编辑或排序',
-  empty: '队列为空',
   editFailed: '编辑队列消息失败',
   removeFailed: '删除队列消息失败',
   steerFailed: '发送队列消息失败',
@@ -46,15 +38,12 @@ export const zh = {
   resumeFailed: '恢复队列失败',
   pauseItemFailed: '暂停该条消息失败',
   resumeItemFailed: '恢复该条消息失败',
-  position: '第 {index} 条，共 {total} 条',
   moved: '已移动到第 {index} 条',
   image: '图片',
-  file: '{name}',
 }
 
 /** English dictionary; every key mirrors {@link zh}. */
 export const en: Record<keyof typeof zh, string> = {
-  queue: 'Queue',
   count: '{n} queued',
   sending: 'Sending',
   paused: 'Paused · {n} queued',
@@ -62,7 +51,6 @@ export const en: Record<keyof typeof zh, string> = {
   steeringTitle: 'Pending steering · {n}',
   steeringPending: 'Waiting for the next step',
   revokeSteering: 'Withdraw this steering message (back to the queue)',
-  revoke: 'Withdraw this message',
   revokeFailed: 'Withdrawing the message failed',
   resumeAction: 'Resume',
   pauseAll: 'Pause the queue (all rows)',
@@ -77,15 +65,9 @@ export const en: Record<keyof typeof zh, string> = {
   cancelEdit: 'Cancel',
   remove: 'Remove',
   steer: 'Send now',
-  steerUnavailable: 'No running task to steer into',
   moveUp: 'Move up',
   moveDown: 'Move down',
-  moveTop: 'Move to front',
-  moveBottom: 'Move to end',
   dragHint: 'Drag to reorder',
-  parked: 'Held',
-  parkedHint: 'Resume the queue to edit or reorder',
-  empty: 'The queue is empty',
   editFailed: 'Editing the queued message failed',
   removeFailed: 'Removing the queued message failed',
   steerFailed: 'Sending the queued message failed',
@@ -94,10 +76,8 @@ export const en: Record<keyof typeof zh, string> = {
   resumeFailed: 'Resuming the queue failed',
   pauseItemFailed: 'Pausing this message failed',
   resumeItemFailed: 'Returning this message failed',
-  position: 'Item {index} of {total}',
   moved: 'Moved to position {index}',
   image: 'Image',
-  file: '{name}',
 }
 
 /** Dictionary namespace owned by this plugin. */
