@@ -76,7 +76,8 @@ export class MessageQueueService extends TypertRemoteService {
         dropExpiredSent(state)
         dropExpiredTombstones(state)
         noteClaimedItem(state, message.id)
-        recordClaimedItem(state, message, turn)
+        // Plugin-injected notices are not user sends and stay out of the Sends list.
+        if (message.source.kind === 'user') recordClaimedItem(state, message, turn)
       })
       const offSessionEvent = ctx.on('session/event', (session, event) => {
         if (event.type !== 'user/message') return

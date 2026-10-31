@@ -139,8 +139,13 @@ export function readQueueState(
     sent: (state?.sent ?? [])
       .map(record => sentItemOf(record, now))
       .filter((item): item is SentItem => item !== undefined),
-    steering: agent.inbox.nextStep.map(steeringItemOf),
+    steering: agent.inbox.nextStep.filter(isUserComposed).map(steeringItemOf),
   }
+}
+
+/** Whether a message was composed by the user rather than injected by a plugin. */
+function isUserComposed(message: UserMessage): boolean {
+  return message.source.kind === 'user'
 }
 
 /** Project one pending steering message to its wire item. */
@@ -283,8 +288,35 @@ export function revokeSentItem(
     return 'requeued'
   }
   appendWithdrawal(agent, record.seq, notice)
+  notifyWithdrawal(agent, notice)
   requeueMessage(agent, state, requeued)
   return 'replaced'
+}
+
+/** Build the plugin-owned notice message used for withdrawals and wake probes. */
+function noticeMessage(text: string): UserMessage {
+  return {
+    id: randomUUID() as unknown as MessageId,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    // A plugin-owned producer kind keeps this row out of the user's own sends.
+    source: { kind: 'runtime-context' } as unknown as UserMessage['source'],
+  }
+}
+
+/**
+ * Deliver a withdrawal notice to a turn that is already running.
+ * The surface replacement rewrites history for later requests; a steering
+ * message makes the running turn see the notice at its next step boundary,
+ * because a steering insert re-opens the stopping turn instead of closing it.
+ * @param agent - Agent whose turn should learn about the withdrawal.
+ * @param notice - model-facing withdrawal text.
+ * @returns whether the notice was steered into the running turn.
+ */
+function notifyWithdrawal(agent: Agent, notice: string): boolean {
+  if (agent.status !== 'running') return false
+  agent.steer(noticeMessage(notice))
+  return true
 }
 
 /** Copy one message for re-sending under a fresh identity. */
@@ -353,6 +385,7 @@ export function applyLateDelivery(
   if (index < 0) return false
   const tombstone = state.tombstones.splice(index, 1)[0] as RevokeTombstone
   appendWithdrawal(agent, seq, notice)
+  notifyWithdrawal(agent, notice)
   dropPendingCopy(agent, state, tombstone.requeuedId)
   return true
 }

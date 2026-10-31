@@ -38,6 +38,13 @@ import {
   wakeQueue,
 } from '../src/queue.ts'
 
+/** Read the text of one message's content blocks. */
+function textOfMessage(message: UserMessage | undefined): string {
+  return (message?.content ?? [])
+    .map(block => (block as { type?: string; text?: string }).text ?? '')
+    .join('')
+}
+
 /** Build one user message with a stable identity. */
 function message(id: string, text: string = id): UserMessage {
   return {
@@ -316,8 +323,10 @@ describe('revocation', () => {
     revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
     expect(fake.inbox.nextTurn).toHaveLength(1)
 
+    fake.status = 'running'
     expect(applyLateDelivery(fake.agent, state, 'a' as unknown as MessageId, 33, REVOKED_NOTICE)).toBe(true)
     expect(fake.appended).toHaveLength(1)
+    expect(fake.steered).toHaveLength(1)
     const intent = fake.appended[0]?.intent as { surfaceOp: { op: string; startSeq: number } }
     expect(intent.surfaceOp.op).toBe('replace')
     expect(Number(intent.surfaceOp.startSeq)).toBe(33)
@@ -330,6 +339,28 @@ describe('revocation', () => {
     const state = createQueueGateState()
     expect(applyLateDelivery(fake.agent, state, 'none' as unknown as MessageId, 1, REVOKED_NOTICE)).toBe(false)
     expect(fake.appended).toHaveLength(0)
+  })
+
+  it('steers the notice into a running turn that already received the message', () => {
+    const fake = fakeAgent()
+    fake.status = 'running'
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a', 'original'), 2)
+    recordDeliveredItem(state, 'a' as unknown as MessageId, 12)
+    expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('replaced')
+    expect(fake.steered).toHaveLength(1)
+    expect(textOfMessage(fake.steered[0])).toBe(REVOKED_NOTICE)
+    expect(fake.steered[0]?.source.kind).toBe('runtime-context')
+  })
+
+  it('leaves an idle turn alone beyond the surface replacement', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a'), 2)
+    recordDeliveredItem(state, 'a' as unknown as MessageId, 12)
+    revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
+    expect(fake.steered).toEqual([])
+    expect(fake.appended).toHaveLength(1)
   })
 
   it('replaces a delivered message in the model surface and requeues its text', () => {

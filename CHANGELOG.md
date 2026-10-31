@@ -14,6 +14,8 @@
 - Open the dock expanded and allow collapsing a queue that holds a single row.
 - Withdraw a steering message while it still waits in `next-step`: it returns to the queue
   without a model notice and without touching the running task.
+- Steer the withdrawal notice into the turn that already received the message, so a
+  withdrawal during a running turn actually stops the work instead of only editing history.
 - Keep withdrawal entries reactive: steering rows come from the inbox projection,
   and the sent list refreshes whenever the inbox changes or a turn keeps running.
 - Track withdrawals of not-yet-delivered sends: a late delivery gains the withdrawal notice and

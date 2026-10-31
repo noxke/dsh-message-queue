@@ -67,7 +67,9 @@ dsh plugin --profile <profile> remove dsh-message-queue
   (at most five), each with its remaining window. Withdrawing one puts its text back at the
   front of the queue. A message the model has not seen yet returns
   unchanged; one the model already saw gains a model-visible replacement that says the user
-  withdrew it, while the chat transcript keeps the original text.
+  withdrew it, while the chat transcript keeps the original text. When the turn that received
+  the message is still running, the plugin also steers the same notice into that turn, so the
+  model learns at its next step boundary that the message was withdrawn.
 - **Withdraw pending steering.** A steering message still waiting for a step boundary is listed
   separately and can be withdrawn at any time: it leaves `next-step`, rejoins the queue, and
   never reaches the model, so no notice is written and the running task is unaffected.
