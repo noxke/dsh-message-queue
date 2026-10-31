@@ -1,6 +1,7 @@
 /**
  * Queue panel replacing the built-in dock: native-style rows with
- * drag-to-reorder, pause/resume, held-item actions, and step buttons.
+ * pointer-following drag reorder, queue-wide and per-row pause toggles, held
+ * row editing, and step buttons.
  * @module dsh-message-queue/client/QueueDock
  */
 
@@ -33,6 +34,8 @@ import {
 
 const EMPTY_ITEMS: readonly InboxItem[] = []
 const EMPTY_PARKED: QueueState['parked'] = []
+/** Distance from a list edge that starts auto-scrolling during a drag. */
+const AUTOSCROLL_EDGE_PX = 24
 
 /** One attachment reference found in a content block. */
 interface AttachmentRef {
@@ -42,6 +45,19 @@ interface AttachmentRef {
     readonly name?: string
     readonly bytes?: number
   }
+}
+
+/** Live drag bookkeeping; kept in a ref so pointer frames do not re-render. */
+interface DragSession {
+  readonly id: string
+  readonly kind: QueueRow['kind']
+  readonly element: HTMLElement
+  readonly startIndex: number
+  readonly startY: number
+  readonly startTop: number
+  index: number
+  lastY: number
+  frame: number
 }
 
 /** Read durable attachment references from model-facing content blocks. */
@@ -148,9 +164,11 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const [editing, setEditing] = useState<{ id: string; text: string; kind: QueueRow['kind'] } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [collapsed, setCollapsed] = useState(true)
-  const [dragging, setDragging] = useState<{ id: string; index: number; start: number } | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const listRef = useRef<HTMLUListElement | null>(null)
+  const dragRef = useRef<DragSession | null>(null)
+  const rowsRef = useRef<readonly QueueRow[]>([])
 
   const refresh = useCallback((): void => {
     void queue.state().then(setRemoteState, () => {
@@ -169,6 +187,10 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     const timer = setInterval(() => { refresh() }, 5000)
     return () => { clearInterval(timer) }
   }, [refresh, remoteState?.paused])
+  useEffect(() => () => {
+    const session = dragRef.current
+    if (session !== null && session.frame !== 0) cancelAnimationFrame(session.frame)
+  }, [])
 
   const parked = remoteState?.parked ?? EMPTY_PARKED
   const rows = useMemo(() => mergeRows(parked, queued), [parked, queued])
@@ -176,6 +198,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     () => localOrder === undefined ? rows : reorderRows(rows, localOrder),
     [localOrder, rows],
   )
+  rowsRef.current = displayRows
   const queuedKey = queued.map(item => item.id).join(',')
   const parkedKey = parked.map(item => item.id).join(',')
 
@@ -200,7 +223,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
 
   const rowCount = displayRows.length + pendingQueue.length
   const paused = remoteState?.paused === true
-  const interactionActive = queueMutable && (editing !== null || busy !== null || dragging !== null)
+  const interactionActive = queueMutable && (editing !== null || busy !== null || draggingId !== null)
   const expanded = !collapsed || interactionActive
   const listVisible = rowCount === 1 || expanded
   const pauseAvailable = remoteState?.available !== false
@@ -233,7 +256,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     }
   }, [notify, updateQueue])
 
-  const runHeld = useCallback(async (
+  const runState = useCallback(async (
     id: string,
     operation: () => Promise<QueueState>,
     failure: string,
@@ -254,7 +277,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     if (editing === null || editing.text.trim() === '') return
     const { id, text, kind } = editing
     const saved = kind === 'parked'
-      ? await runHeld(id, () => queue.edit(id, text), t('editFailed'))
+      ? await runState(id, () => queue.edit(id, text), t('editFailed'))
       : await runAction(id, { kind: 'edit', content: [{ type: 'text', text }] }, t('editFailed'))
     if (saved) setEditing(null)
   }
@@ -278,7 +301,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     }
   }, [displayRows, notify, queue, refresh, t])
 
-  const togglePause = async (): Promise<void> => {
+  const toggleGlobalPause = async (): Promise<void> => {
     if (!pauseAvailable || busy !== null) return
     setBusy('pause')
     try {
@@ -293,46 +316,92 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     }
   }
 
-  /** Row midpoints in display order, for drag targeting. */
-  const midpoints = (): number[] => {
-    const list = listRef.current
-    if (list === null) return []
-    return [...list.querySelectorAll<HTMLElement>('[data-mq-sortable]')].map(node => {
-      const rect = node.getBoundingClientRect()
-      return rect.top + rect.height / 2
-    })
+  const toggleRowPause = (row: QueueRow): void => {
+    if (busy !== null) return
+    if (row.kind === 'parked') {
+      void runState(row.id, () => queue.resumeItem(row.id), t('resumeItemFailed'))
+    } else {
+      void runState(row.id, () => queue.pauseItem(row.id), t('pauseItemFailed'))
+    }
   }
 
-  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, row: QueueRow, index: number): void => {
+  /** Re-measure after React commits a reorder while dragging. */
+  const applyDrag = (): void => {
+    const session = dragRef.current
+    if (session === null) return
+    session.frame = 0
+    const list = listRef.current
+    const element = session.element
+    element.style.transform = 'none'
+    const naturalTop = element.getBoundingClientRect().top
+    const desiredTop = session.startTop + (session.lastY - session.startY)
+    if (list !== null) {
+      const rect = list.getBoundingClientRect()
+      if (session.lastY < rect.top + AUTOSCROLL_EDGE_PX) list.scrollTop -= 10
+      else if (session.lastY > rect.bottom - AUTOSCROLL_EDGE_PX) list.scrollTop += 10
+      const midpoints = [...list.querySelectorAll<HTMLElement>('[data-mq-sortable]')].map(node => {
+        const nodeRect = node.getBoundingClientRect()
+        return nodeRect.top + nodeRect.height / 2
+      })
+      const targetRaw = dragTarget(midpoints, session.lastY)
+      const range = groupRange(rowsRef.current, session.kind)
+      const target = Math.min(Math.max(targetRaw, range.start), range.end)
+      if (target !== session.index) {
+        session.index = target
+        setLocalOrder(moveWithinGroup(rowsRef.current, session.id, target))
+        // Layout moves this row's natural slot; the next frame re-applies the offset.
+        session.frame = requestAnimationFrame(applyDrag)
+        element.style.transform = `translateY(${desiredTop - naturalTop}px)`
+        return
+      }
+    }
+    element.style.transform = `translateY(${desiredTop - naturalTop}px)`
+  }
+
+  const scheduleDrag = (clientY: number): void => {
+    const session = dragRef.current
+    if (session === null) return
+    session.lastY = clientY
+    if (session.frame !== 0) return
+    session.frame = requestAnimationFrame(applyDrag)
+  }
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, row: QueueRow): void => {
     if (!queueMutable || busy !== null || event.button !== 0) return
+    const element = event.currentTarget.closest<HTMLElement>('[data-mq-row]')
+    if (element === null) return
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
-    setDragging({ id: row.id, index, start: index })
-  }
-
-  const onPointerMove = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    if (dragging === null) return
-    const target = dragTarget(midpoints(), event.clientY)
-    const next = moveWithinGroup(displayRows, dragging.id, target)
-    if (next.every((id, index) => id === displayRows[index]?.id)) return
-    setLocalOrder(next)
-    const index = next.indexOf(dragging.id)
-    setDragging({ id: dragging.id, index, start: dragging.start })
-  }
-
-  const onPointerUp = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    if (dragging === null) return
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId)
+    element.style.transform = 'none'
+    const startTop = element.getBoundingClientRect().top
+    const index = displayRows.findIndex(item => item.id === row.id)
+    dragRef.current = {
+      id: row.id,
+      kind: row.kind,
+      element,
+      startIndex: index,
+      startY: event.clientY,
+      startTop,
+      index,
+      lastY: event.clientY,
+      frame: 0,
     }
-    const { id, index, start } = dragging
-    setDragging(null)
-    if (index === start) {
+    setDraggingId(row.id)
+  }
+
+  const finishDrag = (cancelled: boolean): void => {
+    const session = dragRef.current
+    dragRef.current = null
+    setDraggingId(null)
+    if (session === null) return
+    if (session.frame !== 0) cancelAnimationFrame(session.frame)
+    session.element.style.transform = ''
+    if (cancelled || session.index === session.startIndex) {
       setLocalOrder(undefined)
       return
     }
-    setAnnouncement(t('moved', { index: index + 1 }))
-    void commitMove(id, index)
+    setAnnouncement(t('moved', { index: session.index + 1 }))
+    void commitMove(session.id, session.index)
   }
 
   const onHandleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>, row: QueueRow): void => {
@@ -358,7 +427,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
         <div className="mq-panel">
           <div className="mq-paused-bar">
             <span className="mq-status">{t('pausedBar')}</span>
-            <button type="button" className="mq-button" onClick={() => { void togglePause() }} disabled={!pauseAvailable}>
+            <button type="button" className="mq-button" onClick={() => { void toggleGlobalPause() }} disabled={!pauseAvailable}>
               {t('resumeAction')}
             </button>
           </div>
@@ -394,36 +463,52 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
             </span>
           </button>
           {queueMutable && (
-            <button type="button" className="mq-action" aria-label={paused ? t('resume') : t('pause')}
-              title={paused ? t('resume') : t('pause')} disabled={busy !== null || !pauseAvailable}
-              onClick={() => { void togglePause() }}>
+            <button type="button" className="mq-action" aria-label={paused ? t('resumeAll') : t('pauseAll')}
+              title={paused ? t('resumeAll') : t('pauseAll')} disabled={busy !== null || !pauseAvailable}
+              onClick={() => { void toggleGlobalPause() }}>
               {paused ? <PlayIcon /> : <PauseIcon />}
             </button>
           )}
         </div>
-        <ul id="mq-list" ref={listRef} className="mq-list" data-dragging={dragging !== null || undefined}
+        <ul id="mq-list" ref={listRef} className="mq-list" data-dragging={draggingId !== null || undefined}
           hidden={!listVisible}>
           {listVisible && displayRows.map((row) => {
-            const index = displayRows.findIndex(item => item.id === row.id)
             const isParked = row.kind === 'parked'
             const editableText = textOf(row.content)
             const rowBusy = busy !== null
             const isEditing = editing?.id === row.id
+            const heldReason = isParked
+              ? (parked.find(item => item.id === row.id)?.reason ?? 'global')
+              : undefined
             return (
               <li key={`${row.kind}:${row.id}`} className="mq-row" data-mq-row=""
                 data-mq-sortable="" data-parked={isParked || undefined}
-                data-dragging={dragging?.id === row.id || undefined}>
+                data-dragging={draggingId === row.id || undefined}>
                 <button type="button" className="mq-handle" aria-label={t('dragHint')} title={t('dragHint')}
                   disabled={!queueMutable || rowBusy}
-                  onPointerDown={event => { onPointerDown(event, row, index) }}
-                  onPointerMove={onPointerMove}
-                  onPointerUp={onPointerUp}
-                  onPointerCancel={() => { setDragging(null); setLocalOrder(undefined) }}
+                  onPointerDown={event => { onPointerDown(event, row) }}
+                  onPointerMove={event => { scheduleDrag(event.clientY) }}
+                  onPointerUp={() => { finishDrag(false) }}
+                  onPointerCancel={() => { finishDrag(true) }}
                   onKeyDown={event => { onHandleKeyDown(event, row) }}>
                   <GripIcon />
                 </button>
+                <button type="button" className="mq-action" data-pause-toggle=""
+                  aria-label={isParked
+                    ? (paused ? t('resumeSend') : t('resumeItem'))
+                    : t('pauseItem')}
+                  title={isParked
+                    ? (paused ? t('resumeSend') : t('resumeItem'))
+                    : t('pauseItem')}
+                  disabled={!queueMutable || rowBusy}
+                  onClick={() => { toggleRowPause(row) }}>
+                  {isParked ? <PlayIcon /> : <PauseIcon />}
+                </button>
                 {isParked && (
-                  <span className="mq-badge" title={t('parkedHint')}><PauseBadgeIcon />{t('parked')}</span>
+                  <span className="mq-badge" title={heldReason === 'manual' ? t('heldManual') : t('heldGlobal')}>
+                    <PauseBadgeIcon />
+                    {heldReason === 'manual' ? t('heldManual') : t('heldGlobal')}
+                  </span>
                 )}
                 {isEditing
                   ? (
@@ -468,7 +553,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                     <button type="button" className="mq-action" aria-label={t('remove')} title={t('remove')}
                       disabled={rowBusy}
                       onClick={() => {
-                        if (isParked) void runHeld(row.id, () => queue.discard(row.id), t('removeFailed'))
+                        if (isParked) void runState(row.id, () => queue.discard(row.id), t('removeFailed'))
                         else void runAction(row.id, { kind: 'remove' }, t('removeFailed'))
                       }}>
                       <TrashIcon />
@@ -476,7 +561,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                     <button type="button" className="mq-action" aria-label={t('steer')}
                       title={running ? t('steer') : t('steerUnavailable')} disabled={rowBusy || !running}
                       onClick={() => {
-                        if (isParked) void runHeld(row.id, () => queue.steer(row.id), t('steerFailed'))
+                        if (isParked) void runState(row.id, () => queue.steer(row.id), t('steerFailed'))
                         else void runAction(row.id, { kind: 'steer' }, t('steerFailed'))
                       }}>
                       <SendIcon />

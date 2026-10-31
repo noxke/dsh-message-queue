@@ -23,6 +23,8 @@ describe('invocation descriptors', () => {
       'edit',
       'discard',
       'steer',
+      'pauseItem',
+      'resumeItem',
       'pause',
       'resume',
     ])
@@ -75,12 +77,12 @@ describe('strict codecs', () => {
     expect(codec.create().parse({
       available: true,
       paused: true,
-      parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }] }],
+      parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
     })).toEqual({
       available: true,
       paused: true,
-      parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }] }],
+      parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
     })
     expect(() => codec.create().parse({ available: true, paused: 'yes', parked: [], order: [] })).toThrow()

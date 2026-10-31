@@ -27,6 +27,8 @@ export interface ParkedItem {
    * whole `UserMessage`: the source union and replay fields never cross the wire.
    */
   readonly content: readonly unknown[]
+  /** Why the row is held: an explicit per-item pause or the queue-wide pause. */
+  readonly reason: 'manual' | 'global'
 }
 
 /** Observable state of one Session's queue. */
@@ -59,7 +61,11 @@ export interface MessageQueueRemote {
   discard(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Send one held (parked) item into the running turn ahead of the queue. */
   steer(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
-  /** Pause claiming; the current turn finishes, later queued items stay queued. */
+  /** Hold one queued item without pausing the queue. */
+  pauseItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
+  /** Restore one held item; under a queue-wide pause this sends it immediately. */
+  resumeItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
+  /** Pause the queue; every queued item is held until a queue-wide resume. */
   pause(sessionId: string): Promise<RemoteResult<QueueState>>
   /** Resume claiming and restore parked items at the front of the queue. */
   resume(sessionId: string): Promise<RemoteResult<QueueState>>
@@ -80,6 +86,8 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'messageQueue/edit': (sessionId: string, itemId: string, text: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/discard': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/steer': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
+    'messageQueue/pauseItem': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
+    'messageQueue/resumeItem': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/pause': (sessionId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/resume': (sessionId: string) => Promise<RemoteResult<QueueState>>
   }
@@ -129,7 +137,9 @@ function readParkedItem(value: unknown, path: string): ParkedItem {
   if (!isRecord(value)) invalid(path, 'an object')
   const content = value.content
   if (!Array.isArray(content)) invalid(`${path}.content`, 'an array')
-  return { id: readId(value.id, `${path}.id`), content }
+  const reason = value.reason
+  if (reason !== 'manual' && reason !== 'global') invalid(`${path}.reason`, "'manual' or 'global'")
+  return { id: readId(value.id, `${path}.id`), content, reason }
 }
 
 /** Strict validator of one parked queue item. */
@@ -259,6 +269,26 @@ export const QUEUE_STEER_DESCRIPTOR = descriptor(
   STATE_RESULT_CODEC,
 )
 
+/** The `messageQueue/pauseItem` invocation. */
+export const QUEUE_PAUSE_ITEM_DESCRIPTOR = descriptor(
+  'pauseItem',
+  Object.freeze([
+    jsonParameter('sessionId', SESSION_ID_CODEC),
+    jsonParameter('itemId', ITEM_ID_CODEC),
+  ]),
+  STATE_RESULT_CODEC,
+)
+
+/** The `messageQueue/resumeItem` invocation. */
+export const QUEUE_RESUME_ITEM_DESCRIPTOR = descriptor(
+  'resumeItem',
+  Object.freeze([
+    jsonParameter('sessionId', SESSION_ID_CODEC),
+    jsonParameter('itemId', ITEM_ID_CODEC),
+  ]),
+  STATE_RESULT_CODEC,
+)
+
 /** The `messageQueue/pause` invocation. */
 export const QUEUE_PAUSE_DESCRIPTOR = descriptor(
   'pause',
@@ -283,6 +313,8 @@ export const MESSAGE_QUEUE_INVOCATIONS: readonly InvocationDescriptor[] = Object
   QUEUE_EDIT_DESCRIPTOR,
   QUEUE_DISCARD_DESCRIPTOR,
   QUEUE_STEER_DESCRIPTOR,
+  QUEUE_PAUSE_ITEM_DESCRIPTOR,
+  QUEUE_RESUME_ITEM_DESCRIPTOR,
   QUEUE_PAUSE_DESCRIPTOR,
   QUEUE_RESUME_DESCRIPTOR,
 ])

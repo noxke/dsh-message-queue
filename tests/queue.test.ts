@@ -1,6 +1,6 @@
 /**
- * Queue gate and reorder semantics over a structural Agent stand-in: parking,
- * the maintenance gate, restore order, and move clamping.
+ * Queue state and mutation semantics over a structural Agent stand-in:
+ * queue-wide and per-item pause, restore order, move clamping, and held edits.
  * @module dsh-message-queue/tests/queue
  */
 
@@ -12,16 +12,22 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   ItemNotFoundError,
   SteerUnavailableError,
-  closeQueueGate,
   createQueueGateState,
-  editParkedItem,
+  editHeldItem,
+  isIdleState,
   moveQueueRow,
   openQueueGate,
-  parkInsertedMessage,
-  parkQueuedTurns,
+  parkIncomingItem,
+  pauseAllItems,
+  noteClaimedItem,
+  pauseOneItem,
   readQueueState,
-  removeParkedItem,
-  steerParkedItem,
+  releaseQueueGate,
+  removeHeldItem,
+  resumeAllItems,
+  resumeOneItem,
+  steerHeldItem,
+  wakeQueue,
 } from '../src/queue.ts'
 
 /** Build one user message with a stable identity. */
@@ -42,7 +48,7 @@ interface FakeAgent {
   /** Messages steered into the current turn. */
   readonly steered: UserMessage[]
   /** Held maintenance tasks, exposed so tests can release or abort them. */
-  readonly maintenance: { count: number; signal?: AbortSignal; abort: (reason: Error) => void }
+  readonly maintenance: { count: number; releaseAll: () => void }
 }
 
 /**
@@ -51,19 +57,20 @@ interface FakeAgent {
  */
 function fakeAgent(initial: UserMessage[] = []): FakeAgent {
   const inbox = { nextTurn: [...initial], nextStep: [] as UserMessage[] }
-  const controller = { current: undefined as AbortController | undefined }
+  const releases: Array<() => void> = []
   const fake = {
     status: 'idle' as 'idle' | 'running',
     inbox,
     steered: [] as UserMessage[],
     maintenance: {
       count: 0,
-      get signal() { return controller.current?.signal },
-      abort: (reason: Error) => { controller.current?.abort(reason) },
+      releaseAll: () => {
+        for (const release of releases.splice(0)) release()
+      },
     },
     agent: undefined as unknown as Agent,
   }
-  const agent = {
+  fake.agent = {
     id: 'session-1' as unknown as SessionId,
     get status() { return fake.status },
     inbox: {
@@ -81,158 +88,213 @@ function fakeAgent(initial: UserMessage[] = []): FakeAgent {
         return true
       },
     },
-    send(message: UserMessage, target: 'next-turn' | 'next-step', _wakeup: boolean) {
+    send(item: UserMessage, target: 'next-turn' | 'next-step', _wakeup: boolean) {
       const list = target === 'next-turn' ? inbox.nextTurn : inbox.nextStep
-      list.push(message)
+      list.push(item)
     },
-    steer(message: UserMessage) {
-      fake.steered.push(message)
+    steer(item: UserMessage) {
+      fake.steered.push(item)
     },
     runMaintenance(task: (signal: AbortSignal) => Promise<unknown>) {
       fake.maintenance.count += 1
-      const held = new AbortController()
-      controller.current = held
-      const settled = task(held.signal)
+      const controller = new AbortController()
+      const settled = new Promise<void>((resolve, reject) => {
+        releases.push(resolve)
+        controller.signal.addEventListener('abort', () => { reject(controller.signal.reason) }, { once: true })
+      })
+      void task(controller.signal)
       void settled.catch(() => {})
       return settled
     },
-  }
-  fake.agent = agent as unknown as Agent
+  } as unknown as Agent
   return fake
 }
 
 describe('moveQueueRow', () => {
-  it('moves a middle item to the front and records one splice', () => {
+  it('moves a middle queued item to the front', () => {
     const fake = fakeAgent([message('a'), message('b'), message('c')])
     expect(moveQueueRow(fake.agent, undefined, 'c', 0)).toEqual({ order: ['c', 'a', 'b'] })
     expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['c', 'a', 'b'])
   })
 
-  it('clamps out-of-range destinations instead of failing', () => {
-    const fake = fakeAgent([message('a'), message('b'), message('c')])
-    expect(moveQueueRow(fake.agent, undefined, 'a', 99)).toEqual({ order: ['b', 'c', 'a'] })
-    expect(moveQueueRow(fake.agent, undefined, 'c', -4)).toEqual({ order: ['c', 'b', 'a'] })
+  it('moves a held item inside the held group only', () => {
+    const fake = fakeAgent([message('queued')])
+    const state = createQueueGateState()
+    state.held.push({ message: message('held-a'), reason: 'manual', anchor: null })
+    expect(moveQueueRow(fake.agent, state, 'held-a', 0)).toEqual({ order: ['held-a', 'queued'] })
+    expect(state.held.map(item => String(item.message.id))).toEqual(['held-a'])
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['queued'])
   })
 
-  it('rejects an item that is no longer pending', () => {
+  it('rejects an identity that is neither held nor queued', () => {
     const fake = fakeAgent([message('a')])
     expect(() => moveQueueRow(fake.agent, undefined, 'missing', 0)).toThrow(ItemNotFoundError)
   })
+})
 
-  it('reorders held rows without touching the inbox', () => {
-    const fake = fakeAgent([message('queued')])
+describe('queue-wide pause', () => {
+  it('holds every queued item and reports the reason', () => {
+    const fake = fakeAgent([message('a'), message('b')])
     const state = createQueueGateState()
-    state.paused = true
-    state.parked.push(message('held-a'), message('held-b'))
-    expect(moveQueueRow(fake.agent, state, 'held-b', 0)).toEqual({ order: ['held-b', 'held-a', 'queued'] })
-    expect(state.parked.map(item => String(item.id))).toEqual(['held-b', 'held-a'])
-    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['queued'])
+    pauseAllItems(fake.agent, state)
+    expect(fake.inbox.nextTurn).toEqual([])
+    expect(state.globalPaused).toBe(true)
+    expect(state.held.map(item => `${String(item.message.id)}:${item.reason}`)).toEqual(['a:global', 'b:global'])
+    expect(readQueueState(fake.agent, state)).toMatchObject({
+      paused: true,
+      order: ['a', 'b'],
+      parked: [{ id: 'a', reason: 'global' }, { id: 'b', reason: 'global' }],
+    })
+  })
+
+  it('holds idle Agents at their boundary', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    state.globalPaused = true
+    openQueueGate(fake.agent, state)
+    expect(fake.maintenance.count).toBe(1)
+    expect(state.gateOpen).toBe(true)
+  })
+
+  it('resumes only the items the queue-wide pause held', () => {
+    const fake = fakeAgent([message('a')])
+    const state = createQueueGateState()
+    pauseAllItems(fake.agent, state)
+    state.held.push({ message: message('manual'), reason: 'manual', anchor: null })
+    openQueueGate(fake.agent, state)
+    resumeAllItems(fake.agent, state)
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a'])
+    expect(state.held.map(item => `${String(item.message.id)}:${item.reason}`)).toEqual(['manual:manual'])
+    expect(state.globalPaused).toBe(false)
+    fake.maintenance.releaseAll()
+  })
+
+  it('parks a message submitted while the queue is paused', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    state.globalPaused = true
+    fake.inbox.nextTurn.push(message('late'))
+    expect(parkIncomingItem(fake.agent, state, 'late' as unknown as MessageId)).toBe(true)
+    expect(fake.inbox.nextTurn).toEqual([])
+    expect(state.held.map(item => `${String(item.message.id)}:${item.reason}`)).toEqual(['late:global'])
+  })
+})
+
+describe('per-item pause', () => {
+  it('holds one queued item and restores it to its queue position', () => {
+    const fake = fakeAgent([message('a'), message('b'), message('c')])
+    const state = createQueueGateState()
+    pauseOneItem(fake.agent, state, 'b')
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a', 'c'])
+    expect(state.held[0]?.anchor).toBe('c')
+    resumeOneItem(fake.agent, state, 'b')
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a', 'b', 'c'])
+    expect(isIdleState(state)).toBe(true)
+  })
+
+  it('marks the explicitly resumed item for the next claim', () => {
+    const fake = fakeAgent([message('a'), message('b')])
+    const state = createQueueGateState()
+    pauseAllItems(fake.agent, state)
+    openQueueGate(fake.agent, state)
+    resumeOneItem(fake.agent, state, 'b')
+    expect(state.bypass).toBe('b')
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['b'])
+    noteClaimedItem(state, 'b' as unknown as MessageId)
+    expect(state.bypass).toBeNull()
+  })
+
+  it('sends one item immediately when the queue is paused', () => {
+    const fake = fakeAgent([message('a'), message('b')])
+    const state = createQueueGateState()
+    pauseAllItems(fake.agent, state)
+    openQueueGate(fake.agent, state)
+    resumeOneItem(fake.agent, state, 'b')
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['b'])
+    expect(state.held.map(item => String(item.message.id))).toEqual(['a'])
+    expect(state.globalPaused).toBe(true)
+    expect(state.gateOpen).toBe(false)
+  })
+
+  it('wakes an idle Agent after a per-item restore', () => {
+    const fake = fakeAgent([message('a'), message('b')])
+    const state = createQueueGateState()
+    pauseOneItem(fake.agent, state, 'b')
+    resumeOneItem(fake.agent, state, 'b')
+    expect(fake.maintenance.count).toBe(1)
+    fake.maintenance.releaseAll()
+  })
+
+  it('rejects pausing a row that is not queued', () => {
+    const fake = fakeAgent()
+    expect(() => pauseOneItem(fake.agent, createQueueGateState(), 'missing')).toThrow(ItemNotFoundError)
   })
 })
 
 describe('held row operations', () => {
-  /** Hold two messages in the pause state of an idle fake Agent. */
+  /** Two held messages on a running fake Agent. */
   function heldState(): { fake: FakeAgent; state: ReturnType<typeof createQueueGateState> } {
     const fake = fakeAgent()
     const state = createQueueGateState()
-    state.paused = true
     fake.status = 'running'
-    state.parked.push(message('a', 'first'), message('b', 'second'))
+    state.held.push(
+      { message: message('a', 'first'), reason: 'manual', anchor: null },
+      { message: message('b', 'second'), reason: 'manual', anchor: null },
+    )
     return { fake, state }
   }
 
   it('edits one held row in place and preserves its identity', () => {
     const { state } = heldState()
-    editParkedItem(state, 'b', 'rewritten')
-    expect(state.parked.map(item => String(item.id))).toEqual(['a', 'b'])
-    expect(state.parked[1]?.content).toEqual([{ type: 'text', text: 'rewritten' }])
+    editHeldItem(state, 'b', 'rewritten')
+    expect(state.held.map(item => String(item.message.id))).toEqual(['a', 'b'])
+    expect(state.held[1]?.message.content).toEqual([{ type: 'text', text: 'rewritten' }])
   })
 
   it('removes one held row', () => {
     const { state } = heldState()
-    removeParkedItem(state, 'a')
-    expect(state.parked.map(item => String(item.id))).toEqual(['b'])
+    removeHeldItem(state, 'a')
+    expect(state.held.map(item => String(item.message.id))).toEqual(['b'])
   })
 
   it('steers one held row into a running turn', () => {
     const { fake, state } = heldState()
-    steerParkedItem(fake.agent, state, 'a')
-    expect(state.parked.map(item => String(item.id))).toEqual(['b'])
+    steerHeldItem(fake.agent, state, 'a')
     expect(fake.steered.map(item => String(item.id))).toEqual(['a'])
+    expect(state.held.map(item => String(item.message.id))).toEqual(['b'])
   })
 
   it('refuses steering without a running turn', () => {
     const { fake, state } = heldState()
     fake.status = 'idle'
-    expect(() => steerParkedItem(fake.agent, state, 'a')).toThrow(SteerUnavailableError)
-    expect(state.parked).toHaveLength(2)
+    expect(() => steerHeldItem(fake.agent, state, 'a')).toThrow(SteerUnavailableError)
   })
 
-  it('refuses operations on rows that are not held', () => {
-    const fake = fakeAgent([message('queued')])
-    expect(() => editParkedItem(undefined, 'queued', 'x')).toThrow(ItemNotFoundError)
-    expect(() => removeParkedItem(undefined, 'queued')).toThrow(ItemNotFoundError)
-    expect(() => steerParkedItem(fake.agent, undefined, 'queued')).toThrow(ItemNotFoundError)
+  it('refuses held operations on missing rows', () => {
+    expect(() => editHeldItem(undefined, 'x', 'y')).toThrow(ItemNotFoundError)
+    expect(() => removeHeldItem(undefined, 'x')).toThrow(ItemNotFoundError)
+    expect(() => steerHeldItem(fakeAgent().agent, undefined, 'x')).toThrow(ItemNotFoundError)
   })
 })
 
-describe('pause gate', () => {
-  it('parks every queued turn and reports the parked projection', () => {
-    const fake = fakeAgent([message('a', 'first'), message('b', 'second')])
-    const state = createQueueGateState()
-    state.paused = true
-    parkQueuedTurns(fake.agent, state)
-    expect(fake.inbox.nextTurn).toEqual([])
-    expect(state.parked.map(item => String(item.id))).toEqual(['a', 'b'])
-    const projection = readQueueState(fake.agent, state)
-    expect(projection.paused).toBe(true)
-    expect(projection.order).toEqual(['a', 'b'])
-    expect(projection.parked).toHaveLength(2)
-    expect(projection.parked[0]).toMatchObject({ id: 'a' })
-  })
-
-  it('holds the idle Agent in a maintenance task', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    state.paused = true
-    openQueueGate(fake.agent, state)
-    expect(fake.maintenance.count).toBe(1)
-    expect(fake.maintenance.signal).toBeDefined()
-    expect(state.gateOpen).toBe(true)
-  })
-
-  it('parks a message inserted before a running turn reaches its boundary', () => {
+describe('gate release', () => {
+  it('releases the maintenance task and keeps restored work queued', () => {
     const fake = fakeAgent([message('a')])
     const state = createQueueGateState()
-    state.paused = true
-    fake.status = 'running'
-    parkQueuedTurns(fake.agent, state)
-    fake.inbox.nextTurn.push(message('late', 'late'))
-    parkInsertedMessage(fake.agent, state, 'late' as unknown as MessageId)
-    expect(fake.inbox.nextTurn).toEqual([])
-    expect(state.parked.map(item => String(item.id))).toEqual(['a', 'late'])
-  })
-
-  it('leaves inserts alone once the gate is open', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    state.paused = true
+    state.globalPaused = true
+    fake.inbox.nextTurn.length = 0
     openQueueGate(fake.agent, state)
-    fake.inbox.nextTurn.push(message('during-gate'))
-    parkInsertedMessage(fake.agent, state, 'during-gate' as unknown as MessageId)
-    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['during-gate'])
-  })
-
-  it('restores parked items at the front and releases the gate', () => {
-    const fake = fakeAgent([message('a'), message('b')])
-    const state = createQueueGateState()
-    state.paused = true
-    parkQueuedTurns(fake.agent, state)
-    openQueueGate(fake.agent, state)
-    fake.inbox.nextTurn.push(message('during-gate'))
-    closeQueueGate(fake.agent, state)
-    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a', 'b', 'during-gate'])
-    expect(state.paused).toBe(false)
+    fake.inbox.nextTurn.push(message('a'))
+    releaseQueueGate(fake.agent, state)
     expect(state.gateOpen).toBe(false)
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a'])
+    fake.maintenance.releaseAll()
+  })
+
+  it('wakes an idle Agent without a gate', () => {
+    const fake = fakeAgent([message('a')])
+    wakeQueue(fake.agent)
+    expect(fake.maintenance.count).toBe(1)
+    fake.maintenance.releaseAll()
   })
 })

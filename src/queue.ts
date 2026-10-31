@@ -1,7 +1,8 @@
 /**
- * Pause gate and reorder operations over the live Agent inbox. Every mutation
- * goes through `Inbox.splice`, so the Session log, projections, and other
- * clients observe the same durable order.
+ * Pause state and reorder operations over the live Agent inbox. Queued items
+ * stay in the inbox; paused items are held by the plugin. Every mutation goes
+ * through `Inbox.splice`, so the Session log, projections, and other clients
+ * observe the same durable order.
  * @module dsh-message-queue/queue
  */
 
@@ -11,68 +12,83 @@ import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ParkedItem, QueueOrder, QueueState } from './wire.ts'
 
-/** Per-Session pause state owned by the plugin while a queue is paused. */
+/** Why an item is held: an explicit per-item pause or the queue-wide pause. */
+export type PauseReason = 'manual' | 'global'
+
+/** One message removed from the inbox and held by the plugin. */
+export interface HeldItem {
+  readonly message: UserMessage
+  readonly reason: PauseReason
+  /** Identity of the inbox item that followed this one when it was held. */
+  readonly anchor: string | null
+}
+
+/** Per-Session pause state owned by the plugin while a queue or item is paused. */
 export interface QueueGateState {
-  paused: boolean
-  /** Queue items removed from the inbox while paused, in queue order. */
-  parked: UserMessage[]
+  /** Whether the queue-wide pause holds automatic sending. */
+  globalPaused: boolean
+  /** Messages held by a queue-wide or per-item pause, in visible order. */
+  held: HeldItem[]
   /** Resolves the maintenance task holding the Agent at its idle boundary. */
   release: (() => void) | undefined
   gateOpen: boolean
+  /** Held item whose explicit resume must claim the next turn despite the pause. */
+  bypass: string | null
   /** Reentrancy guard around splices this module performs itself. */
   mutating: boolean
 }
 
 /** Create the empty pause state for one Session. */
 export function createQueueGateState(): QueueGateState {
-  return { paused: false, parked: [], release: undefined, gateOpen: false, mutating: false }
+  return { globalPaused: false, held: [], release: undefined, gateOpen: false, bypass: null, mutating: false }
+}
+
+/** Whether the state holds nothing and holds no gate. */
+export function isIdleState(state: QueueGateState): boolean {
+  return !state.globalPaused && state.held.length === 0 && !state.gateOpen && state.bypass === null
 }
 
 /** Project one live message to its wire queue item. */
-function parkedItemOf(message: UserMessage): ParkedItem {
+function parkedItemOf(item: HeldItem): ParkedItem {
   return {
-    id: String(message.id),
-    content: message.content as unknown as unknown[],
+    id: String(item.message.id),
+    content: item.message.content as unknown as unknown[],
+    reason: item.reason,
   }
 }
 
 /**
- * Visible queue identity order: items held by the pause gate first, then the
- * inbox's pending turns.
+ * Visible queue identity order: held items first, then the inbox's pending turns.
  * @param agent - Agent whose inbox is read.
- * @param state - per-Session pause state, absent when the queue is not paused.
+ * @param state - per-Session pause state, absent when nothing is paused.
  * @returns the identity sequence the panel renders.
  */
 export function visibleOrder(agent: Agent, state: QueueGateState | undefined): string[] {
-  const parked = state?.parked ?? []
   return [
-    ...parked.map(message => String(message.id)),
+    ...(state?.held ?? []).map(item => String(item.message.id)),
     ...agent.inbox.nextTurn.map(message => String(message.id)),
   ]
 }
 
 /**
- * Read the queue state of one Agent, optionally including a live pause gate.
+ * Read the queue state of one Agent, optionally including held items.
  * @param agent - Agent whose inbox is the queue.
- * @param state - per-Session pause state, absent when the queue is not paused.
+ * @param state - per-Session pause state, absent when nothing is paused.
  * @returns the wire projection of the queue.
  */
 export function readQueueState(agent: Agent, state: QueueGateState | undefined): QueueState {
-  const parked = state?.parked ?? []
   return {
     available: true,
-    paused: state?.paused === true,
-    parked: parked.map(parkedItemOf),
+    paused: state?.globalPaused === true,
+    parked: (state?.held ?? []).map(parkedItemOf),
     order: visibleOrder(agent, state),
   }
 }
 
 /**
- * Move one visible queue row. A held (parked) item moves inside the held list;
- * a pending turn moves inside `next-turn`. Cross-group moves are rejected by
- * the panel, which keeps each index inside its own group.
+ * Move one visible queue row inside its own group.
  * @param agent - Agent owning the queue.
- * @param state - per-Session pause state, absent when the queue is not paused.
+ * @param state - per-Session pause state, absent when nothing is paused.
  * @param itemId - identity of the row to move.
  * @param toIndex - destination index inside the row's own group; clamped.
  * @returns the complete visible identity order after the move.
@@ -84,11 +100,11 @@ export function moveQueueRow(
   itemId: string,
   toIndex: number,
 ): QueueOrder {
-  const held = state?.paused === true ? state.parked : []
-  const heldIndex = held.findIndex(message => String(message.id) === itemId)
+  const held = state?.held ?? []
+  const heldIndex = held.findIndex(item => String(item.message.id) === itemId)
   if (heldIndex >= 0) {
     const target = Math.min(Math.max(Math.trunc(toIndex), 0), held.length - 1)
-    const moved = held[heldIndex] as UserMessage
+    const moved = held[heldIndex] as HeldItem
     held.splice(heldIndex, 1)
     held.splice(target, 0, moved)
     return { order: visibleOrder(agent, state) }
@@ -119,97 +135,83 @@ export class SteerUnavailableError extends Error {
   }
 }
 
-/** Locate one held item and require the pause state to exist. */
-function requireHeld(state: QueueGateState | undefined, itemId: string): { held: UserMessage[]; index: number } {
-  if (state === undefined) throw new ItemNotFoundError()
-  const held = state.parked
-  const index = held.findIndex(message => String(message.id) === itemId)
-  if (index < 0) throw new ItemNotFoundError()
-  return { held, index }
+/** Anchor for an item about to leave `inbox` at `index`. */
+function anchorAfter(inbox: readonly UserMessage[], index: number): string | null {
+  const next = inbox[index + 1]
+  return next === undefined ? null : String(next.id)
+}
+
+/** Remove one inbox message and return it with its anchor. */
+function takeFromInbox(agent: Agent, index: number): UserMessage {
+  const removed = agent.inbox.splice('next-turn', index, 1, [])
+  const message = removed[0]
+  if (message === undefined) throw new ItemNotFoundError()
+  return message
 }
 
 /**
- * Replace one held item's text in place, preserving its identity and source.
- * @param state - per-Session pause state.
- * @param itemId - identity of the held row.
- * @param text - non-empty replacement text.
- * @throws {@link ItemNotFoundError} when the row is not held.
- */
-export function editParkedItem(state: QueueGateState | undefined, itemId: string, text: string): void {
-  const { held, index } = requireHeld(state, itemId)
-  const current = held[index] as UserMessage
-  held[index] = { ...current, content: [{ type: 'text', text }] }
-}
-
-/**
- * Drop one held item.
- * @param state - per-Session pause state.
- * @param itemId - identity of the held row.
- * @throws {@link ItemNotFoundError} when the row is not held.
- */
-export function removeParkedItem(state: QueueGateState | undefined, itemId: string): void {
-  const { held, index } = requireHeld(state, itemId)
-  held.splice(index, 1)
-}
-
-/**
- * Send one held item into the running turn ahead of the queue.
- * @param agent - Agent owning the queue.
- * @param state - per-Session pause state.
- * @param itemId - identity of the held row.
- * @throws {@link ItemNotFoundError} when the row is not held.
- * @throws {@link SteerUnavailableError} when no turn is running.
- */
-export function steerParkedItem(agent: Agent, state: QueueGateState | undefined, itemId: string): void {
-  const { held, index } = requireHeld(state, itemId)
-  if (agent.status !== 'running') throw new SteerUnavailableError()
-  const [message] = held.splice(index, 1)
-  if (message !== undefined) agent.steer(message)
-}
-
-/**
- * Remove every currently queued turn from the inbox into the pause state.
- * @param agent - Agent owning the queue.
- * @param state - pause state receiving the parked items.
- */
-export function parkQueuedTurns(agent: Agent, state: QueueGateState): void {
-  const queued = agent.inbox.nextTurn
-  if (queued.length === 0) return
-  state.mutating = true
-  try {
-    const removed = agent.inbox.splice('next-turn', 0, queued.length, [])
-    state.parked.push(...removed)
-  } finally {
-    state.mutating = false
-  }
-}
-
-/**
- * Park one message inserted while a running turn has not yet reached its
- * boundary. Without this, the boundary sees pending work and opens the next
- * turn before the pause gate can hold the Agent.
+ * Put one held item back into the inbox.
  * @param agent - Agent owning the inbox.
- * @param state - pause state for that Agent.
- * @param messageId - identity of the message just inserted.
+ * @param item - held item carrying its anchor.
+ * @param front - insert at the head instead of the stored position.
+ * @returns whether the item was inserted ahead of the queue.
  */
-export function parkInsertedMessage(agent: Agent, state: QueueGateState, messageId: MessageId): void {
-  if (!state.paused || state.gateOpen || state.mutating) return
-  if (agent.status !== 'running') return
-  const index = agent.inbox.nextTurn.findIndex(message => message.id === messageId)
-  if (index < 0) return
-  state.mutating = true
+function restoreIntoInbox(agent: Agent, item: HeldItem, front: boolean): boolean {
+  const inbox = agent.inbox.nextTurn
+  let index = inbox.length
+  if (front) {
+    index = 0
+  } else if (item.anchor !== null) {
+    const anchorIndex = inbox.findIndex(message => String(message.id) === item.anchor)
+    if (anchorIndex >= 0) index = anchorIndex
+  }
+  agent.inbox.splice('next-turn', index, 0, [item.message])
+  return index === 0
+}
+
+/**
+ * Send one probe message that sets the driver's wake latch, then remove it.
+ * @param agent - Agent to wake.
+ * @param state - pause state whose insert listener must ignore the probe.
+ */
+function latchWake(agent: Agent, state?: QueueGateState): void {
+  if (agent.inbox.nextTurn.length === 0) return
+  const probe: UserMessage = {
+    id: randomUUID() as unknown as MessageId,
+    role: 'user',
+    content: [{ type: 'text', text: '' }],
+    // An unknown producer kind keeps the probe out of user-message presentation
+    // paths; it is removed before the projection is ever read.
+    source: { kind: 'runtime-context' } as unknown as UserMessage['source'],
+  }
+  if (state !== undefined) state.mutating = true
   try {
-    const removed = agent.inbox.splice('next-turn', index, 1, [])
-    state.parked.push(...removed)
+    agent.send(probe, 'next-turn', true)
+    agent.inbox.remove(probe.id)
   } finally {
-    state.mutating = false
+    if (state !== undefined) state.mutating = false
   }
 }
 
 /**
- * Hold the Agent at its idle boundary so waking input stays queued instead of
- * opening a turn. The maintenance task settles only when resume releases it or
- * the Agent aborts (cancel or disposal).
+ * Wake an idle driver after the plugin restored queued work. The probe message
+ * sets the maintenance wake latch; settling the task replays it.
+ * @param agent - Agent whose queue received work.
+ */
+export function wakeQueue(agent: Agent, state?: QueueGateState): void {
+  if (agent.status !== 'idle') return
+  if (agent.inbox.nextTurn.length === 0) return
+  try {
+    void agent.runMaintenance(async () => { latchWake(agent, state) }).catch(() => {
+      // The Agent was cancelled or disposed while the task was parked.
+    })
+  } catch {
+    // Another activity owns the Agent; it will claim the queue itself.
+  }
+}
+
+/**
+ * Hold the Agent at its idle boundary so waking input never opens a turn.
  * @param agent - Agent to hold; must currently be idle.
  * @param state - pause state owning the release handle.
  */
@@ -230,17 +232,16 @@ export function openQueueGate(agent: Agent, state: QueueGateState): void {
 }
 
 /**
- * Restore parked items at the front of the queue and release the gate.
- * @param agent - Agent owning the queue.
- * @param state - pause state being closed.
+ * Release the maintenance gate and replay its wake latch.
+ * @param agent - Agent owning the gate.
+ * @param state - pause state holding the release handle.
  */
-export function closeQueueGate(agent: Agent, state: QueueGateState): void {
-  state.paused = false
-  const parked = state.parked
-  state.parked = []
-  if (parked.length > 0) agent.inbox.splice('next-turn', 0, 0, parked)
-  if (!state.gateOpen) return
-  wakeQueue(agent)
+export function releaseQueueGate(agent: Agent, state: QueueGateState): void {
+  if (!state.gateOpen) {
+    wakeQueue(agent, state)
+    return
+  }
+  latchWake(agent, state)
   const release = state.release
   state.release = undefined
   state.gateOpen = false
@@ -248,21 +249,177 @@ export function closeQueueGate(agent: Agent, state: QueueGateState): void {
 }
 
 /**
- * Wake the driver while the gate is still open. `runMaintenance` replays only a
- * latched wake after the task settles, so a probe message is inserted and
- * removed synchronously: it sets the latch and is never claimable.
- * @param agent - Agent whose gate is about to be released.
+ * Remove every queued turn from the inbox into the queue-wide pause.
+ * @param agent - Agent owning the queue.
+ * @param state - pause state receiving the held items.
  */
-function wakeQueue(agent: Agent): void {
-  if (agent.inbox.nextTurn.length === 0) return
-  const probe: UserMessage = {
-    id: randomUUID() as unknown as MessageId,
-    role: 'user',
-    content: [{ type: 'text', text: '' }],
-    // An unknown producer kind keeps the probe out of user-message presentation
-    // paths; it is removed before the projection is ever read.
-    source: { kind: 'runtime-context' } as unknown as UserMessage['source'],
+export function pauseAllItems(agent: Agent, state: QueueGateState): void {
+  if (state.globalPaused) return
+  state.globalPaused = true
+  state.bypass = null
+  const inbox = [...agent.inbox.nextTurn]
+  if (inbox.length === 0) return
+  state.mutating = true
+  try {
+    const removed = agent.inbox.splice('next-turn', 0, inbox.length, [])
+    for (let index = 0; index < removed.length; index += 1) {
+      state.held.push({
+        message: removed[index] as UserMessage,
+        reason: 'global',
+        anchor: anchorAfter(removed, index),
+      })
+    }
+  } finally {
+    state.mutating = false
   }
-  agent.send(probe, 'next-turn', true)
-  agent.inbox.remove(probe.id)
+}
+
+/**
+ * Clear the queue-wide pause and restore only the items it held.
+ * @param agent - Agent owning the queue.
+ * @param state - pause state being reduced to per-item pauses.
+ */
+export function resumeAllItems(agent: Agent, state: QueueGateState): void {
+  if (!state.globalPaused) return
+  state.globalPaused = false
+  state.bypass = null
+  const globals = state.held.filter(item => item.reason === 'global')
+  state.held = state.held.filter(item => item.reason === 'manual')
+  if (globals.length > 0) {
+    state.mutating = true
+    try {
+      agent.inbox.splice('next-turn', 0, 0, globals.map(item => item.message))
+    } finally {
+      state.mutating = false
+    }
+  }
+  releaseQueueGate(agent, state)
+}
+
+/**
+ * Hold one queued item without pausing the whole queue.
+ * @param agent - Agent owning the queue.
+ * @param state - pause state receiving the held item.
+ * @param itemId - identity of the queued message.
+ * @throws {@link ItemNotFoundError} when the message is not queued.
+ */
+export function pauseOneItem(agent: Agent, state: QueueGateState, itemId: string): void {
+  const inbox = [...agent.inbox.nextTurn]
+  const index = inbox.findIndex(message => String(message.id) === itemId)
+  if (index < 0) throw new ItemNotFoundError()
+  state.mutating = true
+  try {
+    const message = takeFromInbox(agent, index)
+    state.held.push({ message, reason: 'manual', anchor: anchorAfter(inbox, index) })
+  } finally {
+    state.mutating = false
+  }
+}
+
+/**
+ * Restore one held item to the queue. Under a queue-wide pause this sends the
+ * item immediately; otherwise it returns to its stored queue position.
+ * @param agent - Agent owning the queue.
+ * @param state - pause state holding the item.
+ * @param itemId - identity of the held message.
+ * @throws {@link ItemNotFoundError} when the message is not held.
+ */
+export function resumeOneItem(agent: Agent, state: QueueGateState, itemId: string): void {
+  const index = state.held.findIndex(item => String(item.message.id) === itemId)
+  if (index < 0) throw new ItemNotFoundError()
+  const item = state.held.splice(index, 1)[0] as HeldItem
+  const sendNow = state.globalPaused
+  state.mutating = true
+  try {
+    restoreIntoInbox(agent, item, sendNow)
+  } finally {
+    state.mutating = false
+  }
+  if (!sendNow) {
+    wakeQueue(agent, state)
+    return
+  }
+  state.bypass = String(item.message.id)
+  if (state.gateOpen) {
+    releaseQueueGate(agent, state)
+    return
+  }
+  wakeQueue(agent, state)
+}
+
+/**
+ * Clear the bypass marker when its item has been claimed.
+ * @param state - pause state owning the marker.
+ * @param messageId - identity of the message a turn claimed.
+ */
+export function noteClaimedItem(state: QueueGateState | undefined, messageId: MessageId): void {
+  if (state?.bypass !== undefined && state.bypass === String(messageId)) state.bypass = null
+}
+
+/**
+ * Park a message submitted while the queue-wide pause is active.
+ * @param agent - Agent owning the inbox.
+ * @param state - pause state receiving the item.
+ * @param messageId - identity of the inserted message.
+ * @returns whether the message was moved out of the inbox.
+ */
+export function parkIncomingItem(agent: Agent, state: QueueGateState, messageId: MessageId): boolean {
+  if (!state.globalPaused || state.mutating) return false
+  const index = agent.inbox.nextTurn.findIndex(message => message.id === messageId)
+  if (index < 0) return false
+  state.mutating = true
+  try {
+    const message = takeFromInbox(agent, index)
+    state.held.push({ message, reason: 'global', anchor: null })
+  } finally {
+    state.mutating = false
+  }
+  return true
+}
+
+/** Locate one held item. */
+function requireHeld(state: QueueGateState | undefined, itemId: string): { held: HeldItem[]; index: number } {
+  if (state === undefined) throw new ItemNotFoundError()
+  const index = state.held.findIndex(item => String(item.message.id) === itemId)
+  if (index < 0) throw new ItemNotFoundError()
+  return { held: state.held, index }
+}
+
+/**
+ * Replace one held item's text in place, preserving its identity and source.
+ * @param state - per-Session pause state.
+ * @param itemId - identity of the held row.
+ * @param text - non-empty replacement text.
+ * @throws {@link ItemNotFoundError} when the row is not held.
+ */
+export function editHeldItem(state: QueueGateState | undefined, itemId: string, text: string): void {
+  const { held, index } = requireHeld(state, itemId)
+  const current = held[index] as HeldItem
+  held[index] = { ...current, message: { ...current.message, content: [{ type: 'text', text }] } }
+}
+
+/**
+ * Drop one held item.
+ * @param state - per-Session pause state.
+ * @param itemId - identity of the held row.
+ * @throws {@link ItemNotFoundError} when the row is not held.
+ */
+export function removeHeldItem(state: QueueGateState | undefined, itemId: string): void {
+  const { held, index } = requireHeld(state, itemId)
+  held.splice(index, 1)
+}
+
+/**
+ * Send one held item into the running turn ahead of the queue.
+ * @param agent - Agent owning the queue.
+ * @param state - per-Session pause state.
+ * @param itemId - identity of the held row.
+ * @throws {@link ItemNotFoundError} when the row is not held.
+ * @throws {@link SteerUnavailableError} when no turn is running.
+ */
+export function steerHeldItem(agent: Agent, state: QueueGateState | undefined, itemId: string): void {
+  const { held, index } = requireHeld(state, itemId)
+  if (agent.status !== 'running') throw new SteerUnavailableError()
+  const [item] = held.splice(index, 1)
+  if (item !== undefined) agent.steer(item.message)
 }

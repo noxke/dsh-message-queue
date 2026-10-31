@@ -39,10 +39,11 @@ dsh plugin --profile <profile> add link:"$PWD"
 - **Reorder.** The host service exposes `messageQueue.move`, which writes the new
   `next-turn` order through the Agent inbox splice event. The order is durable, so it
   survives a page refresh and is shared with every connected client.
-- **Pause / resume.** Pausing removes the items queued at that moment from the inbox into
-  the plugin, so the running turn finishes without opening the next one. Items submitted
-  while paused stay in the inbox and are not claimed. Resuming puts the held items back at
-  the front and releases the gate.
+- **Pause / resume.** The row button pauses one item; the header button pauses the whole
+  queue. A queue-wide pause holds every queued item, and new submissions join the held
+  set. Resuming the queue restores only the items the queue-wide pause held; rows you
+  paused yourself stay paused. Resuming a row while the queue is paused sends that one
+  immediately, then the pause re-arms.
 - **Existing actions.** Edit, remove, and steer keep using the Session's own
   `updateQueue` RPC, so their semantics and attachment handling are the built-in ones.
 - **Panel.** The plugin registers the same slot cell as the built-in dock
@@ -58,6 +59,8 @@ dsh plugin --profile <profile> add link:"$PWD"
 - Held rows stay interactive while the queue is paused: drag them, step them with the
   ↑ / ↓ buttons, edit their text, remove them, or send one into a running turn with the
   send button. The pause itself still holds the next automatic turn.
+- Dragging follows the pointer: the row is translated every animation frame while the
+  rest of the list closes the gap; releasing commits the final index once.
 - Rows reorder inside their own group: held rows first, queued rows after them.
 - Steering input (`next-step`) is not listed by the panel.
 - Pause state is written per Session and refreshed on mount, on window focus, and every

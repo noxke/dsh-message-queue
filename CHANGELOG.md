@@ -5,8 +5,11 @@
 - Reorder queued turns by dragging in the queue panel, with the ↑ / ↓ row buttons, or
   with `Alt+↑` / `Alt+↓` / `Alt+Home` / `Alt+End`; the order is written through the Agent
   inbox and survives a refresh.
+- Pause one row or the whole queue: the queue-wide resume restores only the rows it
+  held, and resuming a row under a queue-wide pause sends that row immediately.
 - Keep every row interactive while paused: drag or step held rows, edit their text,
   remove them, and send one into a running turn.
+- Drag the row itself: it follows the pointer every frame and the list closes the gap.
 - Match the built-in queue strip's layout, type scale, and hover states.
 - Add pause/resume: the running turn finishes, later queued messages stay queued until
   resume, and items submitted while paused are not claimed.

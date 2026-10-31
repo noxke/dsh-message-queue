@@ -22,7 +22,10 @@ const text = (value: string) => [{ type: 'text', text: value }]
 /** Rows holding two parked items followed by three queued items. */
 function mixedRows() {
   return mergeRows(
-    [{ id: 'p1', content: text('p1') }, { id: 'p2', content: text('p2') }],
+    [
+      { id: 'p1', content: text('p1'), reason: 'global' },
+      { id: 'p2', content: text('p2'), reason: 'manual' },
+    ],
     [
       { id: 'q1', content: text('q1') },
       { id: 'q2', content: text('q2') },
@@ -41,7 +44,7 @@ describe('textOf', () => {
 describe('mergeRows', () => {
   it('puts held rows before queued rows and drops duplicates', () => {
     const rows = mergeRows(
-      [{ id: 'a', content: text('parked') }],
+      [{ id: 'a', content: text('parked'), reason: 'global' }],
       [{ id: 'a', content: text('stale') }, { id: 'b', content: text('queued') }],
     )
     expect(rows.map(row => `${row.kind}:${row.id}`)).toEqual(['parked:a', 'queued:b'])

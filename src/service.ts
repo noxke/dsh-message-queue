@@ -1,7 +1,8 @@
 /**
- * Host Remote service: queue state reads plus reorder and pause/resume
- * mutations for one live Agent. The service owns the per-Session pause gates
- * and listens for the inbox and status transitions that maintain them.
+ * Host Remote service: queue state reads plus reorder, per-item pause, and
+ * queue-wide pause/resume mutations for one live Agent. The service owns the
+ * per-Session pause state and listens for inbox and status transitions that
+ * maintain it.
  * @module dsh-message-queue/service
  */
 
@@ -12,16 +13,22 @@ import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protoc
 import {
   ItemNotFoundError,
   SteerUnavailableError,
-  closeQueueGate,
   createQueueGateState,
-  editParkedItem,
+  editHeldItem,
+  isIdleState,
   moveQueueRow,
   openQueueGate,
-  parkInsertedMessage,
-  parkQueuedTurns,
+  parkIncomingItem,
+  noteClaimedItem,
+  pauseAllItems,
+  pauseOneItem,
   readQueueState,
-  removeParkedItem,
-  steerParkedItem,
+  releaseQueueGate,
+  removeHeldItem,
+  resumeAllItems,
+  resumeOneItem,
+  steerHeldItem,
+  wakeQueue,
 } from './queue.ts'
 import type { QueueGateState } from './queue.ts'
 import { MESSAGE_QUEUE_NAMESPACE } from './wire.ts'
@@ -49,26 +56,36 @@ export class MessageQueueService extends TypertRemoteService {
         const state = this.gates.get(agent.id)
         if (state === undefined) return
         try {
-          parkInsertedMessage(agent, state, message.id)
+          if (parkIncomingItem(agent, state, message.id)) this.prune(agent)
         } catch (error: unknown) {
           ctx.logger.warn(`message-queue: parking a paused submission failed: ${String(error)}`)
         }
       })
+      const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+        const state = this.gates.get(agent.id)
+        if (state === undefined) return
+        noteClaimedItem(state, message.id)
+        this.prune(agent)
+      })
       const offStatus = ctx.on('agent/status', ({ agent, status }) => {
         if (status !== 'idle') return
         const state = this.gates.get(agent.id)
-        if (state === undefined || !state.paused || state.gateOpen) return
+        if (state === undefined || !state.globalPaused || state.gateOpen) return
         try {
-          openQueueGate(agent, state)
+          // An explicit per-item resume keeps the next turn open for its item;
+          // only otherwise does the queue-wide pause re-arm the boundary gate.
+          if (state.bypass !== null) wakeQueue(agent, state)
+          else openQueueGate(agent, state)
         } catch (error: unknown) {
-          ctx.logger.warn(`message-queue: opening the pause gate failed: ${String(error)}`)
+          ctx.logger.warn(`message-queue: resuming the paused queue failed: ${String(error)}`)
         }
       })
       const offDisposed = ctx.on('agent/disposed', ({ agent }) => {
-        this.forget(agent)
+        this.gates.delete(agent.id)
       })
       return () => {
         offInserted()
+        offClaimed()
         offStatus()
         offDisposed()
         this.restoreAll()
@@ -82,18 +99,18 @@ export class MessageQueueService extends TypertRemoteService {
    * @returns the queue projection; `available` is false without a live Agent.
    */
   state(sessionId: string): QueueState {
-    const agent = this.agents.get(sessionId as unknown as SessionId)
+    const agent = this.agentOf(sessionId)
     if (agent === undefined) return UNAVAILABLE
     return readQueueState(agent, this.gates.get(agent.id))
   }
 
   /**
-   * Move one pending turn message.
+   * Move one visible queue row inside its own group.
    * @param sessionId - Session identity.
-   * @param itemId - identity of the message to move.
-   * @param toIndex - requested destination index, clamped to the queue bounds.
-   * @returns the new `next-turn` identity order.
-   * @throws RemoteError `message-queue/item-not-found` when the item is not pending.
+   * @param itemId - identity of the row to move.
+   * @param toIndex - destination index inside the row's own group; clamped.
+   * @returns the new visible identity order.
+   * @throws RemoteError `message-queue/item-not-found` when the row is gone.
    */
   move(sessionId: string, itemId: string, toIndex: number): QueueOrder {
     const agent = this.requireAgent(sessionId)
@@ -109,7 +126,7 @@ export class MessageQueueService extends TypertRemoteService {
    * @param sessionId - Session identity.
    * @param itemId - identity of the held row.
    * @param text - non-empty replacement text.
-   * @returns the queued state after the edit.
+   * @returns the queue state after the edit.
    */
   edit(sessionId: string, itemId: string, text: string): QueueState {
     const agent = this.requireAgent(sessionId)
@@ -118,7 +135,7 @@ export class MessageQueueService extends TypertRemoteService {
     }
     const state = this.gates.get(agent.id)
     try {
-      editParkedItem(state, itemId, text)
+      editHeldItem(state, itemId, text)
     } catch (error: unknown) {
       throw this.wireError(error, sessionId, itemId)
     }
@@ -129,13 +146,49 @@ export class MessageQueueService extends TypertRemoteService {
    * Discard one held item.
    * @param sessionId - Session identity.
    * @param itemId - identity of the held row.
-   * @returns the queued state after the removal.
+   * @returns the queue state after the removal.
    */
   discard(sessionId: string, itemId: string): QueueState {
     const agent = this.requireAgent(sessionId)
     const state = this.gates.get(agent.id)
     try {
-      removeParkedItem(state, itemId)
+      removeHeldItem(state, itemId)
+    } catch (error: unknown) {
+      throw this.wireError(error, sessionId, itemId)
+    }
+    this.prune(agent)
+    return readQueueState(agent, this.gates.get(agent.id))
+  }
+
+  /**
+   * Send one held item into the running turn.
+   * @param sessionId - Session identity.
+   * @param itemId - identity of the held row.
+   * @returns the queue state after the item left the held list.
+   */
+  steer(sessionId: string, itemId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gates.get(agent.id)
+    try {
+      steerHeldItem(agent, state, itemId)
+    } catch (error: unknown) {
+      throw this.wireError(error, sessionId, itemId)
+    }
+    this.prune(agent)
+    return readQueueState(agent, this.gates.get(agent.id))
+  }
+
+  /**
+   * Hold one queued item without pausing the queue.
+   * @param sessionId - Session identity.
+   * @param itemId - identity of the queued row.
+   * @returns the queue state after the item was held.
+   */
+  pauseItem(sessionId: string, itemId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gateState(agent.id)
+    try {
+      pauseOneItem(agent, state, itemId)
     } catch (error: unknown) {
       throw this.wireError(error, sessionId, itemId)
     }
@@ -143,20 +196,94 @@ export class MessageQueueService extends TypertRemoteService {
   }
 
   /**
-   * Send one held item into the running turn.
+   * Restore one held item, sending it immediately under a queue-wide pause.
    * @param sessionId - Session identity.
    * @param itemId - identity of the held row.
-   * @returns the queued state after the item left the held list.
+   * @returns the queue state after the item rejoined the queue.
    */
-  steer(sessionId: string, itemId: string): QueueState {
+  resumeItem(sessionId: string, itemId: string): QueueState {
     const agent = this.requireAgent(sessionId)
-    const state = this.gates.get(agent.id)
+    const state = this.gates.get(agent.id) ?? createQueueGateState()
     try {
-      steerParkedItem(agent, state, itemId)
+      resumeOneItem(agent, state, itemId)
     } catch (error: unknown) {
       throw this.wireError(error, sessionId, itemId)
     }
+    this.prune(agent)
+    return readQueueState(agent, this.gates.get(agent.id))
+  }
+
+  /**
+   * Pause the whole queue: every queued item is held and no new turn opens.
+   * @param sessionId - Session identity.
+   * @returns the paused queue state.
+   * @throws RemoteError `message-queue/agent-not-attached` without a live Agent.
+   */
+  pause(sessionId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gateState(agent.id)
+    pauseAllItems(agent, state)
+    if (agent.status === 'idle') {
+      try {
+        openQueueGate(agent, state)
+      } catch (error: unknown) {
+        this.ctx.logger.warn(`message-queue: deferring the pause gate: ${String(error)}`)
+      }
+    }
     return readQueueState(agent, state)
+  }
+
+  /**
+   * Clear the queue-wide pause and restore only the items it held.
+   * @param sessionId - Session identity.
+   * @returns the resumed queue state.
+   * @throws RemoteError `message-queue/agent-not-attached` without a live Agent.
+   */
+  resume(sessionId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gates.get(agent.id)
+    if (state === undefined) return readQueueState(agent, undefined)
+    resumeAllItems(agent, state)
+    this.prune(agent)
+    return readQueueState(agent, this.gates.get(agent.id))
+  }
+
+  /** The live Agent registry, read through the service context. */
+  private get agents(): Context['agents'] {
+    return this.ctx.agents
+  }
+
+  /** Optional live Agent lookup for read-only projections. */
+  private agentOf(sessionId: string): Agent | undefined {
+    return this.agents.get(sessionId as unknown as SessionId)
+  }
+
+  /** Resolve one live Agent or raise the wire error the Client renders. */
+  private requireAgent(sessionId: string): Agent {
+    const agent = this.agentOf(sessionId)
+    if (agent === undefined) {
+      throw new RemoteError(
+        'message-queue/agent-not-attached',
+        `session "${sessionId}" has no live agent`,
+        { sessionId },
+      )
+    }
+    return agent
+  }
+
+  /** State for one Agent, created on first use. */
+  private gateState(sessionId: string): QueueGateState {
+    const existing = this.gates.get(sessionId)
+    if (existing !== undefined) return existing
+    const state = createQueueGateState()
+    this.gates.set(sessionId, state)
+    return state
+  }
+
+  /** Drop a state that no longer holds items or a gate. */
+  private prune(agent: Agent): void {
+    const state = this.gates.get(agent.id)
+    if (state !== undefined && isIdleState(state)) this.gates.delete(agent.id)
   }
 
   /** Map a queue mutation failure to its wire error. */
@@ -178,85 +305,24 @@ export class MessageQueueService extends TypertRemoteService {
     return error
   }
 
-  /**
-   * Pause one Session's queue: the running turn finishes, later queued turns
-   * stay queued until {@link resume}.
-   * @param sessionId - Session identity.
-   * @returns the paused queue state.
-   * @throws RemoteError `message-queue/agent-not-attached` without a live Agent.
-   */
-  pause(sessionId: string): QueueState {
-    const agent = this.requireAgent(sessionId)
-    const existing = this.gates.get(agent.id)
-    if (existing?.paused === true) return readQueueState(agent, existing)
-    const state = existing ?? createQueueGateState()
-    this.gates.set(agent.id, state)
-    state.paused = true
-    parkQueuedTurns(agent, state)
-    if (agent.status === 'idle') {
-      try {
-        openQueueGate(agent, state)
-      } catch (error: unknown) {
-        this.ctx.logger.warn(`message-queue: deferring the pause gate: ${String(error)}`)
-      }
-    }
-    return readQueueState(agent, state)
-  }
-
-  /**
-   * Resume one Session's queue and restore parked items at its front.
-   * @param sessionId - Session identity.
-   * @returns the resumed queue state.
-   * @throws RemoteError `message-queue/agent-not-attached` without a live Agent.
-   */
-  resume(sessionId: string): QueueState {
-    const agent = this.requireAgent(sessionId)
-    const state = this.gates.get(agent.id)
-    if (state === undefined || !state.paused) return readQueueState(agent, state)
-    closeQueueGate(agent, state)
-    this.gates.delete(agent.id)
-    return readQueueState(agent, undefined)
-  }
-
-  /** The live Agent registry, read through the service context. */
-  private get agents(): Context['agents'] {
-    return this.ctx.agents
-  }
-
-  /** Resolve one live Agent or raise the wire error the Client renders. */
-  private requireAgent(sessionId: string): Agent {
-    const agent = this.agents.get(sessionId as unknown as SessionId)
-    if (agent === undefined) {
-      throw new RemoteError(
-        'message-queue/agent-not-attached',
-        `session "${sessionId}" has no live agent`,
-        { sessionId },
-      )
-    }
-    return agent
-  }
-
-  /** Drop one disposed Agent's gate, returning parked items to its inbox when possible. */
-  private forget(agent: Agent): void {
-    const state = this.gates.get(agent.id)
-    if (state === undefined) return
-    this.gates.delete(agent.id)
-    try {
-      closeQueueGate(agent, state)
-    } catch (error: unknown) {
-      this.ctx.logger.warn(`message-queue: restoring parked items on disposal failed: ${String(error)}`)
-    }
-  }
-
-  /** Return every parked item to its live inbox before this plugin unloads. */
+  /** Return every held item to its live inbox before this plugin unloads. */
   private restoreAll(): void {
     for (const [sessionId, state] of this.gates) {
-      const agent = this.agents.get(sessionId as unknown as SessionId)
+      const agent = this.agentOf(sessionId)
       if (agent === undefined) continue
       try {
-        closeQueueGate(agent, state)
+        if (state.held.length > 0) {
+          state.mutating = true
+          agent.inbox.splice('next-turn', 0, 0, state.held.map(item => item.message))
+          state.held = []
+          state.mutating = false
+        }
+        if (state.globalPaused) {
+          state.globalPaused = false
+          releaseQueueGate(agent, state)
+        }
       } catch (error: unknown) {
-        this.ctx.logger.warn(`message-queue: restoring parked items on unload failed: ${String(error)}`)
+        this.ctx.logger.warn(`message-queue: restoring held items on unload failed: ${String(error)}`)
       }
     }
     this.gates.clear()
