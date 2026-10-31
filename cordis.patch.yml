@@ -1,0 +1,8 @@
+# Bundle patch for this plugin: inserts its host entry into the profile roster. The
+# browser half reaches the client through `dsh.client` and the `./client` export, not
+# through this patch. `id` is the entry's stable identity inside the composed tree.
+- insert:
+    - id: message-queue
+      name: 'dsh-message-queue'
+      config:
+        enabled: true
