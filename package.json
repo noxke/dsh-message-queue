@@ -1,7 +1,7 @@
 {
   "name": "dsh-message-queue",
   "version": "0.1.0",
-  "description": "Drag-to-reorder and pause/resume for the DeepSeek Harness pending message queue.",
+  "description": "Reorder, pause, and withdraw recent sends for the DeepSeek Harness pending message queue.",
   "keywords": [
     "dsh",
     "deepseek-harness",

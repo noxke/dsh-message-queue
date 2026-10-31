@@ -11,14 +11,25 @@ stays queued until you resume.
 
 ## Install
 
+Install from a checkout:
+
 ```bash
-pnpm install --ignore-workspace
+git clone https://github.com/noxke/dsh-message-queue.git
+cd dsh-message-queue
+pnpm install
 pnpm build
 dsh plugin --profile <profile> add link:"$PWD"
 ```
 
-`dsh plugin` writes the package into the profile. Build first: the host loads
-`lib/index.js`, and the browser module loader loads `lib/client.js`.
+The package declares `dsh.bundle.patch`, so `dsh plugin` also appends it as a profile bundle
+layer. Build first: the host loads `lib/index.js`, and the browser module loader loads
+`lib/client.js`. Restart the host process or reload the plugin after installing or updating.
+
+### Uninstall
+
+```bash
+dsh plugin --profile <profile> remove dsh-message-queue
+```
 
 ## Configuration
 
@@ -86,7 +97,7 @@ dsh plugin --profile <profile> add link:"$PWD"
 ## Development
 
 ```bash
-pnpm install --ignore-workspace
+pnpm install
 pnpm typecheck   # tsc -p tsconfig.test.json
 pnpm lint        # oxlint src tests scripts
 pnpm test        # vitest run

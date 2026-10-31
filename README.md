@@ -71,7 +71,7 @@ dsh plugin --profile <profile> add link:"$PWD"
 ## 开发
 
 ```bash
-pnpm install --ignore-workspace
+pnpm install
 pnpm typecheck   # tsc -p tsconfig.test.json
 pnpm lint        # oxlint src tests scripts
 pnpm test        # vitest run
