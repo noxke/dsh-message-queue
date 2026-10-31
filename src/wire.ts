@@ -1,15 +1,15 @@
 /**
  * Wire vocabulary shared by the Host and browser faces: the queue-state JSON
- * shape, its strict codecs, and the invocation descriptors both Typert faces
- * register verbatim.
+ * shape, its strict boundary validators, and the invocation descriptors both
+ * Typert faces register verbatim.
  * @module dsh-message-queue/wire
  */
 
-import { z } from 'zod'
 import type {
   InvocationDescriptor,
   RemoteResult,
   TypertCodec,
+  TypertSchema,
 } from '@deepseek-ai/dsh-typert-protocol'
 
 /** Package name; also the Client contribution owner and the bundle id. */
@@ -83,33 +83,88 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   }
 }
 
-/** Strict wire schema of one parked queue item. */
-export const PARKED_ITEM_SCHEMA = z.object({
-  id: z.string().min(1),
-  content: z.array(z.json()),
-})
+/** Raise the stable validation failure the Gateway turns into `gateway/bad-request`. */
+function invalid(path: string, expected: string): never {
+  throw new TypeError(`message-queue wire: ${path} must be ${expected}`)
+}
 
-/** Strict wire schema of {@link QueueState}. */
-export const QUEUE_STATE_SCHEMA = z.object({
-  available: z.boolean(),
-  paused: z.boolean(),
-  parked: z.array(PARKED_ITEM_SCHEMA),
-  order: z.array(z.string()),
-})
+/** Whether a value is a non-null, non-array object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
-/** Strict wire schema of {@link QueueOrder}. */
-export const QUEUE_ORDER_SCHEMA = z.object({
-  order: z.array(z.string()),
-})
+/** Read one non-empty identity string. */
+function readId(value: unknown, path: string): string {
+  if (typeof value !== 'string' || value === '') invalid(path, 'a non-empty string')
+  return value
+}
+
+/** Read one safe-integer index. */
+function readIndex(value: unknown, path: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) invalid(path, 'a safe integer')
+  return value
+}
+
+/** Read an array of non-empty identity strings. */
+function readIdArray(value: unknown, path: string): string[] {
+  if (!Array.isArray(value)) invalid(path, 'an array')
+  return value.map((item, index) => readId(item, `${path}[${index}]`))
+}
+
+/** Read one parked item projection. */
+function readParkedItem(value: unknown, path: string): ParkedItem {
+  if (!isRecord(value)) invalid(path, 'an object')
+  const content = value.content
+  if (!Array.isArray(content)) invalid(`${path}.content`, 'an array')
+  return { id: readId(value.id, `${path}.id`), content }
+}
+
+/** Strict validator of one parked queue item. */
+export const PARKED_ITEM_SCHEMA: TypertSchema = {
+  parse(value: unknown): ParkedItem {
+    return readParkedItem(value, 'parkedItem')
+  },
+}
+
+/** Strict validator of {@link QueueState}. */
+export const QUEUE_STATE_SCHEMA: TypertSchema = {
+  parse(value: unknown): QueueState {
+    if (!isRecord(value)) invalid('queueState', 'an object')
+    if (typeof value.available !== 'boolean') invalid('queueState.available', 'a boolean')
+    if (typeof value.paused !== 'boolean') invalid('queueState.paused', 'a boolean')
+    const parked = value.parked
+    if (!Array.isArray(parked)) invalid('queueState.parked', 'an array')
+    return {
+      available: value.available,
+      paused: value.paused,
+      parked: parked.map((item, index) => readParkedItem(item, `queueState.parked[${index}]`)),
+      order: readIdArray(value.order, 'queueState.order'),
+    }
+  },
+}
+
+/** Strict validator of {@link QueueOrder}. */
+export const QUEUE_ORDER_SCHEMA: TypertSchema = {
+  parse(value: unknown): QueueOrder {
+    if (!isRecord(value)) invalid('queueOrder', 'an object')
+    return { order: readIdArray(value.order, 'queueOrder.order') }
+  },
+}
 
 /** Build the boundary codec both Typert faces carry for one type symbol. */
-function strictCodec(typeSymbol: string, schema: z.ZodType): TypertCodec {
+function strictCodec(typeSymbol: string, schema: TypertSchema): TypertCodec {
   return { mode: 'strict', typeSymbol, create: () => schema }
 }
 
-const SESSION_ID_CODEC = strictCodec('dsh-message-queue/types#SessionId', z.string().min(1))
-const ITEM_ID_CODEC = strictCodec('dsh-message-queue/types#QueueItemId', z.string().min(1))
-const INDEX_CODEC = strictCodec('dsh-message-queue/types#QueueIndex', z.number().int())
+const SESSION_ID_CODEC = strictCodec('dsh-message-queue/types#SessionId', {
+  parse: (value: unknown) => readId(value, 'sessionId'),
+})
+const ITEM_ID_CODEC = strictCodec('dsh-message-queue/types#QueueItemId', {
+  parse: (value: unknown) => readId(value, 'itemId'),
+})
+const INDEX_CODEC = strictCodec('dsh-message-queue/types#QueueIndex', {
+  parse: (value: unknown) => readIndex(value, 'toIndex'),
+})
 const STATE_RESULT_CODEC = strictCodec('dsh-message-queue/types#QueueState', QUEUE_STATE_SCHEMA)
 const ORDER_RESULT_CODEC = strictCodec('dsh-message-queue/types#QueueOrder', QUEUE_ORDER_SCHEMA)
 

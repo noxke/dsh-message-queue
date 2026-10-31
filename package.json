@@ -33,10 +33,7 @@
       "types": "./lib/typert.d.ts",
       "default": "./lib/typert.js"
     },
-    "./client": {
-      "types": "./lib/client/index.d.ts",
-      "default": "./lib/client.js"
-    },
+    "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
@@ -74,9 +71,6 @@
     "@deepseek-ai/dsh-typert-protocol": ">=0.2.0-rc.2 <0.3.0",
     "@deepseek-ai/schemastery": "^3.18.4",
     "react": "^18.2.0"
-  },
-  "dependencies": {
-    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
