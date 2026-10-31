@@ -10,9 +10,8 @@ import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerE
 import type { InboxItem, InboxProjection, PendingSubmission, QueueDockProps } from './contracts.ts'
 import {
   dragTarget,
-  groupRange,
   mergeRows,
-  moveWithinGroup,
+  moveRow,
   reorderRows,
   textOf,
 } from './model.ts'
@@ -35,6 +34,7 @@ import {
 
 const EMPTY_ITEMS: readonly InboxItem[] = []
 const EMPTY_PARKED: QueueState['parked'] = []
+const EMPTY_ORDER: readonly string[] = []
 const EMPTY_STEERING: QueueState['steering'] = []
 /** Distance from a list edge that starts auto-scrolling during a drag. */
 const AUTOSCROLL_EDGE_PX = 24
@@ -181,23 +181,19 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }, [queue])
 
   useEffect(() => { refresh() }, [refresh, sessionId])
-  // Steering rows are the inbox projection; refresh the host snapshot too so
-  // sent rows appear as soon as an inbox item is claimed or admitted.
+  // Pause and held rows live in host memory rather than a projection, so the
+  // snapshot is re-read whenever the inbox changes.
   const nextStepKey = steeringProjected.map(item => item.id).join(',')
   const nextTurnKey = queued.map(item => item.id).join(',')
   useEffect(() => {
     refresh()
   }, [nextStepKey, nextTurnKey, refresh])
   useEffect(() => {
-    if (!running) return
-    const timer = setInterval(() => { refresh() }, 2000)
-    return () => { clearInterval(timer) }
-  }, [refresh, running])
-  useEffect(() => {
     const onFocus = (): void => { refresh() }
     window.addEventListener('focus', onFocus)
     return () => { window.removeEventListener('focus', onFocus) }
   }, [refresh])
+  useEffect(() => { refresh() }, [refresh, running])
   useEffect(() => {
     if (remoteState?.paused !== true) return
     const timer = setInterval(() => { refresh() }, 5000)
@@ -209,7 +205,8 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }, [])
 
   const parked = remoteState?.parked ?? EMPTY_PARKED
-  const rows = useMemo(() => mergeRows(parked, queued), [parked, queued])
+  const hostOrder = remoteState?.order ?? EMPTY_ORDER
+  const rows = useMemo(() => mergeRows(parked, queued, hostOrder), [parked, queued, hostOrder])
   const displayRows = useMemo(
     () => localOrder === undefined ? rows : reorderRows(rows, localOrder),
     [localOrder, rows],
@@ -252,14 +249,12 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     if (editing !== null && (!queueMutable || !displayRows.some(row => row.id === editing.id))) setEditing(null)
   }, [displayRows, editing, queueMutable])
 
-  /** Visible destination for one row, undefined at its group edge. */
+  /** Visible destination for one row, undefined at either end of the queue. */
   const edgeTarget = (row: QueueRow, direction: -1 | 1): number | undefined => {
-    const range = groupRange(displayRows, row.kind)
-    if (range.end < 0) return undefined
     const current = displayRows.findIndex(item => item.id === row.id)
+    if (current < 0) return undefined
     const target = direction < 0 ? current - 1 : current + 1
-    if (target < range.start || target > range.end) return undefined
-    return target
+    return target < 0 || target >= displayRows.length ? undefined : target
   }
 
   const runAction = useCallback(async (id: string, action: Parameters<typeof updateQueue>[1], failure: string): Promise<boolean> => {
@@ -289,8 +284,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
       return false
     } finally {
       setBusy(current => current === id ? null : current)
+      refresh()
     }
-  }, [notify])
+  }, [notify, refresh])
 
   const saveEdit = async (): Promise<void> => {
     if (editing === null || editing.text.trim() === '') return
@@ -302,14 +298,10 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }
 
   const commitMove = useCallback(async (itemId: string, targetVisible: number): Promise<void> => {
-    const row = displayRows.find(item => item.id === itemId)
-    if (row === undefined) return
-    const parkedCount = displayRows.filter(item => item.kind === 'parked').length
-    const groupIndex = row.kind === 'parked' ? targetVisible : targetVisible - parkedCount
-    setLocalOrder(moveWithinGroup(displayRows, itemId, targetVisible))
+    setLocalOrder(moveRow(displayRows, itemId, targetVisible))
     setBusy(itemId)
     try {
-      const result = await queue.move(itemId, groupIndex)
+      const result = await queue.move(itemId, targetVisible)
       setLocalOrder(result.order.length === 0 ? undefined : result.order)
     } catch {
       setLocalOrder(undefined)
@@ -362,12 +354,10 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
         const nodeRect = node.getBoundingClientRect()
         return nodeRect.top + nodeRect.height / 2
       })
-      const targetRaw = dragTarget(midpoints, session.lastY)
-      const range = groupRange(rowsRef.current, session.kind)
-      const target = Math.min(Math.max(targetRaw, range.start), range.end)
+      const target = dragTarget(midpoints, session.lastY)
       if (target !== session.index) {
         session.index = target
-        setLocalOrder(moveWithinGroup(rowsRef.current, session.id, target))
+        setLocalOrder(moveRow(rowsRef.current, session.id, target))
         // Layout moves this row's natural slot; the next frame re-applies the offset.
         session.frame = requestAnimationFrame(applyDrag)
         element.style.transform = `translateY(${desiredTop - naturalTop}px)`
@@ -429,8 +419,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     if (event.altKey && event.key === 'ArrowUp') target = edgeTarget(row, -1)
     else if (event.altKey && event.key === 'ArrowDown') target = edgeTarget(row, 1)
     else if (event.altKey && (event.key === 'Home' || event.key === 'End')) {
-      const range = groupRange(displayRows, row.kind)
-      if (range.end >= 0) target = event.key === 'Home' ? range.start : range.end
+      target = event.key === 'Home' ? 0 : displayRows.length - 1
     }
     if (target === undefined) return
     event.preventDefault()
@@ -582,11 +571,8 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                       <TrashIcon />
                     </button>
                     <button type="button" className="mq-action" aria-label={t('steer')}
-                      title={running ? t('steer') : t('steerUnavailable')} disabled={rowBusy || !running}
-                      onClick={() => {
-                        if (isParked) void runState(row.id, () => queue.steer(row.id), t('steerFailed'))
-                        else void runAction(row.id, { kind: 'steer' }, t('steerFailed'))
-                      }}>
+                      title={t('steer')} disabled={rowBusy}
+                      onClick={() => { void runState(row.id, () => queue.steer(row.id), t('steerFailed')) }}>
                       <SendIcon />
                     </button>
                   </span>
@@ -602,22 +588,33 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
               <span className="mq-status" role="status">{t('sending')}</span>
             </li>
           ))}
-          {listVisible && steeringItems.map(item => (
-            <li key={`steer:${item.id}`} className="mq-row mq-steering-row" data-mq-row="" data-steering="">
-              <span className="mq-badge" aria-hidden><SendIcon /></span>
-              <Attachments content={item.content} loadImage={loadImage} t={t} />
-              <Preview content={item.content} t={t} />
-              <span className="mq-status">{t('steeringPending')}</span>
-              <span className="mq-actions">
-                <button type="button" className="mq-action" aria-label={t('revokeSteering')}
-                  title={t('revokeSteering')} disabled={busy !== null}
-                  onClick={() => { void runState(item.id, () => queue.revoke(item.id), t('revokeFailed')) }}>
-                  <UndoIcon />
-                </button>
-              </span>
-            </li>
-          ))}
         </ul>
+        {steeringItems.length > 0 && (
+          <div className="mq-steering">
+            {rowCount > 0 && (
+              <div className="mq-subhead">
+                <span className="mq-status">{t('steeringTitle', { n: steeringItems.length })}</span>
+              </div>
+            )}
+            <ul className="mq-list mq-steering-list" aria-label={t('steeringTitle', { n: steeringItems.length })}>
+              {steeringItems.map(item => (
+                <li key={`steer:${item.id}`} className="mq-row mq-steering-row" data-mq-row="" data-steering="">
+                  <span className="mq-badge" aria-hidden><SendIcon /></span>
+                  <Attachments content={item.content} loadImage={loadImage} t={t} />
+                  <Preview content={item.content} t={t} />
+                  <span className="mq-status">{t('steeringPending')}</span>
+                  <span className="mq-actions">
+                    <button type="button" className="mq-action" aria-label={t('revokeSteering')}
+                      title={t('revokeSteering')} disabled={busy !== null}
+                      onClick={() => { void runState(item.id, () => queue.revoke(item.id), t('revokeFailed')) }}>
+                      <UndoIcon />
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
       <span className="mq-sr" role="status" aria-live="polite">{announcement}</span>
     </div>

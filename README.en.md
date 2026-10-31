@@ -57,8 +57,16 @@ dsh plugin --profile <profile> remove dsh-message-queue
   set. Resuming the queue restores only the items the queue-wide pause held; rows you
   paused yourself stay paused. Resuming a row while the queue is paused sends that one
   immediately, then the pause re-arms.
-- **Existing actions.** Edit, remove, and steer keep using the Session's own
-  `updateQueue` RPC, so their semantics and attachment handling are the built-in ones.
+- **One linear queue.** Pausing a row only keeps it out of sending; it keeps its place in the
+  list. Every row reorders in the same list, and sending always takes the first unpaused row.
+- **One linear queue.** Only dragging a row or pressing the arrow buttons changes the order.
+  Pause, resume, send, and remove leave every other row in place.
+- **Pause / resume.** The row button pauses one message, the header button pauses the whole
+  queue. A paused row leaves the inbox and remembers its position; resuming puts it back.
+  Whenever the queue changes (pause, resume, new message, removal, withdrawal) or a turn ends,
+  an idle Agent sends the first unpaused row from the front. Paused rows are skipped in place.
+- **Send now.** The send button on any row sends it immediately, out of queue order: a running
+  turn receives it as steering, an idle Agent runs it as the next message.
 - **Panel.** The plugin registers the same slot cell as the built-in dock
   (`conversation.input.dock`, id `queue`) with a lower priority, so it renders instead of
   the built-in queue strip and steps aside when the plugin is disabled.
@@ -66,7 +74,8 @@ dsh plugin --profile <profile> remove dsh-message-queue
 - **Withdraw pending steering.** A steering message still waiting for a step boundary is listed
   separately and can be withdrawn at any time: it leaves `next-step`, rejoins the queue, and
   never reaches the model, so no notice is written and the running task is unaffected. Once the
-  model claims the message, withdrawal is no longer available.
+  model claims the message, withdrawal is no longer available. The block sits outside the
+  queue list, so collapsing the queue keeps it visible.
 
 ## Limits
 
@@ -75,15 +84,16 @@ dsh plugin --profile <profile> remove dsh-message-queue
 - Items held by a pause live in host memory. A host restart loses the pause flag and the
   held batch; a graceful plugin unload writes the batch back to the inbox.
 - Held rows stay interactive while the queue is paused: drag them, step them with the
-  ↑ / ↓ buttons, edit their text, remove them, or send one into a running turn with the
-  send button. The pause itself still holds the next automatic turn.
+  ↑ / ↓ buttons, edit their text, remove them, or send one with the send button. The pause only
+  keeps them out of automatic sending.
 - Dragging follows the pointer: the row is translated every animation frame while the
   rest of the list closes the gap; releasing commits the final index once.
-- Rows reorder inside their own group: held rows first, queued rows after them.
 - The dock opens expanded; a single queued row collapses like any other list.
 - Steering input (`next-step`) is not listed by the panel.
 - Withdrawal applies only to steering messages the model has not claimed. A claimed message can
   no longer be withdrawn; send it again as a new queued turn instead.
+- When no pending message remains (all sent or removed), the queue-wide pause clears itself and
+  the next submission sends normally.
 - Pause state is written per Session and refreshed on mount, on window focus, and every
   few seconds while paused; two browser tabs converge on the host answer.
 

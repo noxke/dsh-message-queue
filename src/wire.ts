@@ -69,7 +69,7 @@ export interface MessageQueueRemote {
   edit(sessionId: string, itemId: string, text: string): Promise<RemoteResult<QueueState>>
   /** Discard one held (parked) item. */
   discard(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
-  /** Send one held (parked) item into the running turn ahead of the queue. */
+  /** Send one row immediately, out of queue order. */
   steer(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Hold one queued item without pausing the queue. */
   pauseItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
@@ -110,8 +110,6 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'message-queue/agent-not-attached': { readonly sessionId: string }
     /** The requested item is neither queued nor held by the pause gate. */
     'message-queue/item-not-found': { readonly sessionId: string; readonly itemId: string }
-    /** A held item was sent while no turn is running to accept steering. */
-    'message-queue/steer-unavailable': { readonly sessionId: string; readonly itemId: string }
     /** A held item edit carried no non-whitespace text. */
     'message-queue/invalid-content': { readonly sessionId: string; readonly itemId: string }
   }
@@ -159,13 +157,6 @@ function readParkedItem(value: unknown, path: string): ParkedItem {
   const reason = value.reason
   if (reason !== 'manual' && reason !== 'global') invalid(`${path}.reason`, "'manual' or 'global'")
   return { id: readId(value.id, `${path}.id`), content, reason }
-}
-
-/** Strict validator of one parked queue item. */
-export const PARKED_ITEM_SCHEMA: TypertSchema = {
-  parse(value: unknown): ParkedItem {
-    return readParkedItem(value, 'parkedItem')
-  },
 }
 
 /** Strict validator of one pending steering item. */

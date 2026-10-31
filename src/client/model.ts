@@ -19,12 +19,6 @@ export interface QueuedItem {
   readonly content: readonly unknown[]
 }
 
-/** Inclusive index range occupied by one row kind. */
-export interface RowRange {
-  readonly start: number
-  readonly end: number
-}
-
 /**
  * Read the text blocks of one row.
  * @param content - model-facing content blocks.
@@ -41,23 +35,38 @@ export function textOf(content: readonly unknown[]): string {
 }
 
 /**
- * Merge the parked projection and the inbox projection into display rows.
- * Held rows come first: they were queued before anything the pause gate let in.
+ * Build the display rows for one linear queue.
+ * The host order is authoritative because paused rows are held outside the
+ * inbox; without it the rows fall back to inbox order followed by held order.
  * @param parked - items held by the pause gate.
  * @param queued - pending `next-turn` rows from the inbox projection.
+ * @param order - host-reported visible identity order, paused rows included.
  * @returns rows in visible queue order.
  */
 export function mergeRows(
   parked: readonly ParkedItem[],
   queued: readonly QueuedItem[],
+  order: readonly string[] = [],
 ): QueueRow[] {
-  const parkedIds = new Set(parked.map(item => item.id))
-  return [
-    ...parked.map(item => ({ kind: 'parked' as const, id: item.id, content: item.content })),
-    ...queued
-      .filter(item => !parkedIds.has(item.id))
-      .map(item => ({ kind: 'queued' as const, id: item.id, content: item.content })),
-  ]
+  const parkedById = new Map(parked.map(item => [item.id, item]))
+  const queuedById = new Map(queued.map(item => [item.id, item]))
+  const rows: QueueRow[] = []
+  for (const id of order) {
+    const held = parkedById.get(id)
+    if (held !== undefined) {
+      rows.push({ kind: 'parked', id, content: held.content })
+      parkedById.delete(id)
+      continue
+    }
+    const item = queuedById.get(id)
+    if (item !== undefined) {
+      rows.push({ kind: 'queued', id, content: item.content })
+      queuedById.delete(id)
+    }
+  }
+  for (const item of parkedById.values()) rows.push({ kind: 'parked', id: item.id, content: item.content })
+  for (const item of queuedById.values()) rows.push({ kind: 'queued', id: item.id, content: item.content })
+  return rows
 }
 
 /**
@@ -104,59 +113,30 @@ export function dragTarget(midpoints: readonly number[], pointerY: number): numb
 }
 
 /**
- * Index range occupied by one row kind; `end` is -1 when the group is empty.
- * @param rows - display rows.
- * @param kind - row kind to measure.
- */
-export function groupRange(rows: readonly QueueRow[], kind: QueueRow['kind']): RowRange {
-  let start = -1
-  let end = -1
-  rows.forEach((row, index) => {
-    if (row.kind !== kind) return
-    if (start < 0) start = index
-    end = index
-  })
-  return start < 0 ? { start: 0, end: -1 } : { start, end }
-}
-
-/**
- * Move one row to a visible index, clamped inside its own group.
+ * Move one row to a visible index of the single linear queue.
  * @param rows - display rows.
  * @param id - identity of the moved row.
- * @param targetVisible - requested visible destination.
+ * @param targetVisible - requested visible destination, clamped.
  * @returns the complete identity order after the move.
  */
-export function moveWithinGroup(rows: readonly QueueRow[], id: string, targetVisible: number): string[] {
+export function moveRow(rows: readonly QueueRow[], id: string, targetVisible: number): string[] {
   const ids = rows.map(row => row.id)
-  const row = rows.find(item => item.id === id)
-  if (row === undefined) return ids
-  const range = groupRange(rows, row.kind)
-  if (range.end < 0) return ids
-  const groupIds = ids.slice(range.start, range.end + 1)
-  const from = groupIds.indexOf(id)
+  const from = ids.indexOf(id)
   if (from < 0) return ids
-  const to = Math.min(Math.max(targetVisible - range.start, 0), groupIds.length - 1)
-  const moved = moveIds(groupIds, from, to)
-  const next = [...ids]
-  next.splice(range.start, groupIds.length, ...moved)
-  return next
+  return moveIds(ids, from, targetVisible)
 }
 
 /**
- * Visible destination for one keyboard step, or undefined at the group edge.
+ * Visible destination for one keyboard step, or undefined at the list edge.
  * @param rows - display rows.
  * @param id - identity of the row being moved.
  * @param step - negative moves up; positive moves down.
  */
 export function stepTarget(rows: readonly QueueRow[], id: string, step: number): number | undefined {
-  const row = rows.find(item => item.id === id)
-  if (row === undefined) return undefined
-  const range = groupRange(rows, row.kind)
-  if (range.end < 0) return undefined
-  const index = rows.findIndex(item => item.id === id)
+  const index = rows.findIndex(row => row.id === id)
+  if (index < 0) return undefined
   const target = index + step
-  if (target < range.start || target > range.end) return undefined
-  return target
+  return target < 0 || target >= rows.length ? undefined : target
 }
 
 /**

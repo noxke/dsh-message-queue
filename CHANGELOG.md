@@ -2,9 +2,19 @@
 
 ## 0.1.0
 
+- One linear queue: only dragging or the ↑ / ↓ buttons change the order, and pause, resume,
+  send, and remove keep every other row in place.
 - Reorder queued turns by dragging in the queue panel, with the ↑ / ↓ row buttons, or
   with `Alt+↑` / `Alt+↓` / `Alt+Home` / `Alt+End`; the order is written through the Agent
   inbox and survives a refresh.
+- Send any row immediately with the send button, out of queue order, whether the Agent is
+  running or idle; paused rows keep their position while skipped by automatic sending.
+- Clear a queue-wide pause as soon as no pending message remains.
+- Send a paused row with the send button even when no turn is running: it becomes the next
+  message instead of failing as steering.
+- Keep the withdrawable steering rows visible while the queue list is collapsed.
+- Treat the queue as one linear list: paused rows keep their position and stay sortable, and
+  sending takes the first unpaused row.
 - Pause one row or the whole queue: the queue-wide resume restores only the rows it
   held, and resuming a row under a queue-wide pause sends that row immediately.
 - Keep every row interactive while paused: drag or step held rows, edit their text,

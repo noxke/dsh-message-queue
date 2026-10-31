@@ -120,7 +120,7 @@ describe('plugin mounting', () => {
     await ctx.fiber.dispose()
   })
 
-  it('holds the queued items and opens the gate when the queue is paused', async () => {
+  it('holds the queued items when the queue is paused', async () => {
     const { ctx, service, agents } = await mount()
     const fake = fakeAgent('session-1', [message('a'), message('b')])
     agents.set('session-1', fake)
@@ -129,20 +129,21 @@ describe('plugin mounting', () => {
     expect(paused.paused).toBe(true)
     expect(paused.parked.map(item => `${item.id}:${item.reason}`)).toEqual(['a:global', 'b:global'])
     expect(fake.inbox.nextTurn).toEqual([])
-    expect(fake.maintenance).toBe(1)
+    expect(fake.maintenance).toBe(0)
     await ctx.fiber.dispose()
   })
 
   it('parks a submission inserted while the queue is paused', async () => {
     const { ctx, service, agents } = await mount()
-    const fake = fakeAgent('session-1')
+    const fake = fakeAgent('session-1', [message('held')])
     agents.set('session-1', fake)
     service.pause('session-1')
 
     fake.inbox.nextTurn.push(message('late'))
     ctx.emit('agent/inbox/inserted', { agent: fake.agent, message: message('late') })
     expect(fake.inbox.nextTurn).toEqual([])
-    expect(service.state('session-1').parked.map(item => `${item.id}:${item.reason}`)).toEqual(['late:global'])
+    expect(service.state('session-1').parked.map(item => `${item.id}:${item.reason}`))
+      .toEqual(['held:global', 'late:global'])
     await ctx.fiber.dispose()
   })
 
@@ -172,42 +173,57 @@ describe('plugin mounting', () => {
     await ctx.fiber.dispose()
   })
 
-  it('runs an explicitly resumed item before re-arming the queue pause', async () => {
+  it('restores an explicitly resumed item at its position while the queue stays paused', async () => {
     const { ctx, service, agents } = await mount()
-    const fake = fakeAgent('session-1', [message('a')])
-    fake.status = 'running'
+    const fake = fakeAgent('session-1', [message('a'), message('b')])
     agents.set('session-1', fake)
     service.pause('session-1')
     expect(fake.inbox.nextTurn).toEqual([])
 
-    service.resumeItem('session-1', 'a')
-    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a'])
-    expect(service.state('session-1').paused).toBe(true)
-
-    fake.status = 'idle'
-    ctx.emit('agent/status', { agent: fake.agent, status: 'idle' })
-    // The bypass item keeps the driver waking instead of re-arming the gate.
-    expect(fake.maintenance).toBe(1)
+    const resumed = service.resumeItem('session-1', 'b')
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['b'])
+    expect(resumed.order).toEqual(['a', 'b'])
+    expect(resumed.paused).toBe(true)
 
     fake.inbox.nextTurn.length = 0
-    ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('a'), turn: 1 })
+    ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('b'), turn: 1 })
+    // The queue still holds "a", so the pause stays armed.
     expect(service.state('session-1').paused).toBe(true)
     fake.releaseMaintenance()
     await ctx.fiber.dispose()
   })
 
-  it('reopens the gate when an idle Agent returns to the paused queue', async () => {
+  it('clears the queue-wide pause when the queue becomes empty', async () => {
+    const { ctx, service, agents } = await mount()
+    const fake = fakeAgent('session-1', [message('a')])
+    agents.set('session-1', fake)
+    expect(service.pause('session-1').paused).toBe(true)
+    expect(service.state('session-1').parked.map(item => item.id)).toEqual(['a'])
+
+    expect(service.discard('session-1', 'a').paused).toBe(false)
+    fake.releaseMaintenance()
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps a pause requested on an empty queue from sticking', async () => {
+    const { ctx, service, agents } = await mount()
+    const fake = fakeAgent('session-1')
+    agents.set('session-1', fake)
+    expect(service.pause('session-1').paused).toBe(false)
+    fake.releaseMaintenance()
+    await ctx.fiber.dispose()
+  })
+
+  it('leaves an idle Agent alone while a paused queue waits for a resume', async () => {
     const { ctx, service, agents } = await mount()
     const fake = fakeAgent('session-1', [message('a')])
     fake.status = 'running'
     agents.set('session-1', fake)
     service.pause('session-1')
-    expect(fake.maintenance).toBe(0)
 
     fake.status = 'idle'
     ctx.emit('agent/status', { agent: fake.agent, status: 'idle' })
-    expect(fake.maintenance).toBe(1)
-    fake.releaseMaintenance()
+    expect(fake.maintenance).toBe(0)
     await ctx.fiber.dispose()
   })
 })
