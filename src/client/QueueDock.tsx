@@ -35,7 +35,6 @@ import {
 
 const EMPTY_ITEMS: readonly InboxItem[] = []
 const EMPTY_PARKED: QueueState['parked'] = []
-const EMPTY_SENT: QueueState['sent'] = []
 const EMPTY_STEERING: QueueState['steering'] = []
 /** Distance from a list edge that starts auto-scrolling during a drag. */
 const AUTOSCROLL_EDGE_PX = 24
@@ -164,8 +163,6 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const queued = inbox?.['next-turn'] ?? EMPTY_ITEMS
   const steeringProjected = inbox?.['next-step'] ?? EMPTY_ITEMS
   const [remoteState, setRemoteState] = useState<QueueState | undefined>(undefined)
-  const [stateAt, setStateAt] = useState(0)
-  const [clock, setClock] = useState(0)
   const [localOrder, setLocalOrder] = useState<readonly string[] | undefined>(undefined)
   const [editing, setEditing] = useState<{ id: string; text: string; kind: QueueRow['kind'] } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
@@ -178,10 +175,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   const rowsRef = useRef<readonly QueueRow[]>([])
 
   const refresh = useCallback((): void => {
-    void queue.state().then(state => {
-      setRemoteState(state)
-      setStateAt(Date.now())
-    }, () => {
+    void queue.state().then(setRemoteState, () => {
       /* state reads are advisory; the panel still renders the projection */
     })
   }, [queue])
@@ -243,21 +237,10 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
       && !admitted.has(submission.requestId))
   }, [pendingSubmissions, queued])
 
-  const sentItems = remoteState?.sent ?? EMPTY_SENT
   // The projection is the live source; the host snapshot is the fallback while
   // the projection has not loaded yet.
   const steeringItems = inbox === undefined ? (remoteState?.steering ?? EMPTY_STEERING) : steeringProjected
-  const clockMs = Math.max(clock, stateAt)
-  const sentRows = sentItems.flatMap(item => {
-    const remaining = item.remainingMs - Math.max(0, clockMs - stateAt)
-    return remaining > 0 ? [{ item, remaining }] : []
-  })
 
-  useEffect(() => {
-    if (sentItems.length === 0) return
-    const timer = setInterval(() => { setClock(Date.now()) }, 1000)
-    return () => { clearInterval(timer) }
-  }, [sentItems.length])
   const rowCount = displayRows.length + pendingQueue.length
   const paused = remoteState?.paused === true
   const interactionActive = queueMutable && (editing !== null || busy !== null || draggingId !== null)
@@ -455,9 +438,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     void commitMove(row.id, target)
   }
 
-  if (rowCount === 0 && steeringItems.length === 0 && sentRows.length === 0 && !paused) return null
+  if (rowCount === 0 && steeringItems.length === 0 && !paused) return null
 
-  if (rowCount === 0 && steeringItems.length === 0 && sentRows.length === 0) {
+  if (rowCount === 0 && steeringItems.length === 0) {
     return (
       <div className="mq-dock">
         <div className="mq-panel">
@@ -494,9 +477,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
             <span className="mq-lead"><QueueIcon /></span>
             <span className="mq-count">
               {rowCount === 0
-                ? steeringItems.length > 0
-                  ? t('steeringTitle', { n: steeringItems.length })
-                  : t('sentTitle', { n: sentRows.length })
+                ? t('steeringTitle', { n: steeringItems.length })
                 : paused ? t('paused', { n: rowCount }) : t('count', { n: rowCount })}
             </span>
             {!listVisible && pendingQueue.length > 0 && <span className="mq-status">{t('sending')}</span>}
@@ -630,24 +611,6 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
               <span className="mq-actions">
                 <button type="button" className="mq-action" aria-label={t('revokeSteering')}
                   title={t('revokeSteering')} disabled={busy !== null}
-                  onClick={() => { void runState(item.id, () => queue.revoke(item.id), t('revokeFailed')) }}>
-                  <UndoIcon />
-                </button>
-              </span>
-            </li>
-          ))}
-          {listVisible && sentRows.map(({ item, remaining }) => (
-            <li key={`sent:${item.id}`} className="mq-row mq-sent-row" data-mq-row="" data-sent="">
-              <span className="mq-badge" aria-hidden><UndoIcon /></span>
-              <Attachments content={item.content} loadImage={loadImage} t={t} />
-              <Preview content={item.content} t={t} />
-              <span className="mq-status">
-                {item.delivered ? t('sentDelivered') : t('sentPending')} · {t('sentTurn', { n: item.turn })}
-                {' · '}{t('revokeWindow', { n: Math.max(1, Math.ceil(remaining / 1000)) })}
-              </span>
-              <span className="mq-actions">
-                <button type="button" className="mq-action" aria-label={t('revoke')} title={t('revoke')}
-                  disabled={busy !== null}
                   onClick={() => { void runState(item.id, () => queue.revoke(item.id), t('revokeFailed')) }}>
                   <UndoIcon />
                 </button>

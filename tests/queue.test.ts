@@ -13,37 +13,23 @@ import {
   ItemNotFoundError,
   SteerUnavailableError,
   createQueueGateState,
-  applyLateDelivery,
   editHeldItem,
   isIdleState,
   moveQueueRow,
+  noteClaimedItem,
   openQueueGate,
   parkIncomingItem,
   pauseAllItems,
-  noteClaimedItem,
   pauseOneItem,
   readQueueState,
-  recordClaimedItem,
-  recordDeliveredItem,
-  REVOKED_NOTICE,
-  RevokeExpiredError,
-  revokeItem,
-  revokePendingSteering,
-  revokeSentItem,
   releaseQueueGate,
   removeHeldItem,
   resumeAllItems,
   resumeOneItem,
+  revokeSteering,
   steerHeldItem,
   wakeQueue,
 } from '../src/queue.ts'
-
-/** Read the text of one message's content blocks. */
-function textOfMessage(message: UserMessage | undefined): string {
-  return (message?.content ?? [])
-    .map(block => (block as { type?: string; text?: string }).text ?? '')
-    .join('')
-}
 
 /** Build one user message with a stable identity. */
 function message(id: string, text: string = id): UserMessage {
@@ -302,132 +288,16 @@ describe('held row operations', () => {
   })
 })
 
-describe('revocation', () => {
-  it('returns an undelivered message to the queue under a fresh identity', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a', 'original'), 2)
-    expect(state.sent[0]?.seq).toBeNull()
-    expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('requeued')
-    expect(fake.inbox.nextTurn).toHaveLength(1)
-    expect(String(fake.inbox.nextTurn[0]?.id)).not.toBe('a')
-    expect(fake.appended).toHaveLength(0)
-    expect(state.sent).toHaveLength(0)
-    expect(state.tombstones).toHaveLength(1)
-  })
-
-  it('upgrades a late delivery to a withdrawal and drops the queue copy', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a', 'original'), 2)
-    revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
-    expect(fake.inbox.nextTurn).toHaveLength(1)
-
-    fake.status = 'running'
-    expect(applyLateDelivery(fake.agent, state, 'a' as unknown as MessageId, 33, REVOKED_NOTICE)).toBe(true)
-    expect(fake.appended).toHaveLength(1)
-    expect(fake.steered).toHaveLength(1)
-    const intent = fake.appended[0]?.intent as { surfaceOp: { op: string; startSeq: number } }
-    expect(intent.surfaceOp.op).toBe('replace')
-    expect(Number(intent.surfaceOp.startSeq)).toBe(33)
-    expect(fake.inbox.nextTurn).toEqual([])
-    expect(state.tombstones).toHaveLength(0)
-  })
-
-  it('ignores a delivery that matches no pending withdrawal', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    expect(applyLateDelivery(fake.agent, state, 'none' as unknown as MessageId, 1, REVOKED_NOTICE)).toBe(false)
-    expect(fake.appended).toHaveLength(0)
-  })
-
-  it('steers the notice into a running turn that already received the message', () => {
-    const fake = fakeAgent()
-    fake.status = 'running'
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a', 'original'), 2)
-    recordDeliveredItem(state, 'a' as unknown as MessageId, 12)
-    expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('replaced')
-    expect(fake.steered).toHaveLength(1)
-    expect(textOfMessage(fake.steered[0])).toBe(REVOKED_NOTICE)
-    expect(fake.steered[0]?.source.kind).toBe('runtime-context')
-  })
-
-  it('leaves an idle turn alone beyond the surface replacement', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a'), 2)
-    recordDeliveredItem(state, 'a' as unknown as MessageId, 12)
-    revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
-    expect(fake.steered).toEqual([])
-    expect(fake.appended).toHaveLength(1)
-  })
-
-  it('replaces a delivered message in the model surface and requeues its text', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a', 'original'), 2)
-    recordDeliveredItem(state, 'a' as unknown as MessageId, 17)
-    expect(readQueueState(fake.agent, state).sent[0]?.delivered).toBe(true)
-
-    expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('replaced')
-    expect(fake.appended).toHaveLength(1)
-    expect(fake.appended[0]?.type).toBe('user/message')
-    const intent = fake.appended[0]?.intent as { surfaceOp: { op: string; startSeq: number; endSeq: number } }
-    expect(intent.surfaceOp.op).toBe('replace')
-    expect(Number(intent.surfaceOp.startSeq)).toBe(17)
-    expect(Number(intent.surfaceOp.endSeq)).toBe(17)
-    expect(fake.inbox.nextTurn).toHaveLength(1)
-    const requeued = fake.inbox.nextTurn[0] as UserMessage
-    expect(String(requeued.id)).not.toBe('a')
-    expect(requeued.content).toEqual([{ type: 'text', text: 'original' }])
-  })
-
-  it('holds the requeued text while the queue is paused', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    state.globalPaused = true
-    recordClaimedItem(state, message('a'), 1)
-    recordDeliveredItem(state, 'a' as unknown as MessageId, 3)
-    revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
-    expect(fake.inbox.nextTurn).toEqual([])
-    expect(state.held[0]?.reason).toBe('global')
-    expect(String(state.held[0]?.message.id)).not.toBe('a')
-  })
-
-  it('rejects a withdrawal after the window closes', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a'), 1, 1_000)
-    expect(() => revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE, 16_000))
-      .toThrow(RevokeExpiredError)
-    expect(fake.inbox.nextTurn).toEqual([])
-    expect(state.sent).toHaveLength(1)
-  })
-
-  it('drops expired sent rows from the projection', () => {
-    const fake = fakeAgent()
-    const state = createQueueGateState()
-    recordClaimedItem(state, message('a'), 1, 1_000)
-    expect(readQueueState(fake.agent, state, 2_000).sent).toHaveLength(1)
-    expect(readQueueState(fake.agent, state, 20_000).sent).toHaveLength(0)
-  })
-
-  it('rejects revoking an item outside the recent list', () => {
-    expect(() => revokeSentItem(fakeAgent().agent, createQueueGateState(), 'missing', REVOKED_NOTICE))
-      .toThrow(ItemNotFoundError)
-  })
-})
-
-describe('pending steering withdrawal', () => {
-  it('removes a pending steering message and returns it to the queue without a notice', () => {
+describe('steering withdrawal', () => {
+  it('removes a pending steering message and returns it to the queue', () => {
     const fake = fakeAgent([message('queued')])
     fake.inbox.nextStep.push(message('steer', 'inserted task'))
     const state = createQueueGateState()
-    expect(revokeItem(fake.agent, state, 'steer', REVOKED_NOTICE)).toBe('steering')
+    revokeSteering(fake.agent, state, 'steer')
     expect(fake.inbox.nextStep).toEqual([])
     expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['steer', 'queued'])
     expect(fake.appended).toHaveLength(0)
+    expect(state.held).toHaveLength(0)
   })
 
   it('holds the withdrawn steering message while the queue is paused', () => {
@@ -435,16 +305,26 @@ describe('pending steering withdrawal', () => {
     fake.inbox.nextStep.push(message('steer'))
     const state = createQueueGateState()
     state.globalPaused = true
-    expect(revokePendingSteering(fake.agent, state, 'steer')).toBe(true)
+    revokeSteering(fake.agent, state, 'steer')
     expect(fake.inbox.nextTurn).toEqual([])
     expect(state.held[0]?.reason).toBe('global')
     expect(String(state.held[0]?.message.id)).toBe('steer')
   })
 
-  it('reports a steering identity that is no longer pending', () => {
-    expect(revokePendingSteering(fakeAgent().agent, createQueueGateState(), 'missing')).toBe(false)
-    expect(() => revokeItem(fakeAgent().agent, createQueueGateState(), 'missing', REVOKED_NOTICE))
-      .toThrow(ItemNotFoundError)
+  it('rejects a message the model already received', () => {
+    const fake = fakeAgent([message('claimed')])
+    expect(() => revokeSteering(fake.agent, createQueueGateState(), 'claimed')).toThrow(ItemNotFoundError)
+  })
+
+  it('reports only user-composed steering rows in the projection', () => {
+    const fake = fakeAgent()
+    fake.inbox.nextStep.push(message('mine'), {
+      id: 'notice' as unknown as MessageId,
+      role: 'user',
+      content: [{ type: 'text', text: 'plugin notice' }],
+      source: { kind: 'runtime-context' } as unknown as UserMessage['source'],
+    })
+    expect(readQueueState(fake.agent, undefined).steering.map(item => item.id)).toEqual(['mine'])
   })
 })
 

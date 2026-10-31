@@ -63,16 +63,10 @@ dsh plugin --profile <profile> remove dsh-message-queue
   (`conversation.input.dock`, id `queue`) with a lower priority, so it renders instead of
   the built-in queue strip and steps aside when the plugin is disabled.
 
-- **Withdraw a recent send.** The panel lists messages the queue sent within the last 15 seconds
-  (at most five), each with its remaining window. Withdrawing one puts its text back at the
-  front of the queue. A message the model has not seen yet returns
-  unchanged; one the model already saw gains a model-visible replacement that says the user
-  withdrew it, while the chat transcript keeps the original text. When the turn that received
-  the message is still running, the plugin also steers the same notice into that turn, so the
-  model learns at its next step boundary that the message was withdrawn.
 - **Withdraw pending steering.** A steering message still waiting for a step boundary is listed
   separately and can be withdrawn at any time: it leaves `next-step`, rejoins the queue, and
-  never reaches the model, so no notice is written and the running task is unaffected.
+  never reaches the model, so no notice is written and the running task is unaffected. Once the
+  model claims the message, withdrawal is no longer available.
 
 ## Limits
 
@@ -88,11 +82,8 @@ dsh plugin --profile <profile> remove dsh-message-queue
 - Rows reorder inside their own group: held rows first, queued rows after them.
 - The dock opens expanded; a single queued row collapses like any other list.
 - Steering input (`next-step`) is not listed by the panel.
-- The 15-second window and five-message cap apply only to already claimed messages; pending
-  steering messages have no time limit.
-- The window between claiming a message and its delivery to the model is short: withdrawing in
-  that window requeues the text first, and if the delivery still lands the withdrawal notice is
-  appended and the duplicate queue copy is dropped, so the task does not run twice.
+- Withdrawal applies only to steering messages the model has not claimed. A claimed message can
+  no longer be withdrawn; send it again as a new queued turn instead.
 - Pause state is written per Session and refreshed on mount, on window focus, and every
   few seconds while paused; two browser tabs converge on the host answer.
 

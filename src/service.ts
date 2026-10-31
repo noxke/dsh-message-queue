@@ -13,28 +13,21 @@ import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protoc
 import {
   ItemNotFoundError,
   SteerUnavailableError,
-  applyLateDelivery,
   createQueueGateState,
-  dropExpiredSent,
-  dropExpiredTombstones,
   editHeldItem,
   isIdleState,
   moveQueueRow,
+  noteClaimedItem,
   openQueueGate,
   parkIncomingItem,
-  noteClaimedItem,
   pauseAllItems,
-  recordClaimedItem,
-  recordDeliveredItem,
-  REVOKED_NOTICE,
-  RevokeExpiredError,
-  revokeItem,
   pauseOneItem,
   readQueueState,
   releaseQueueGate,
   removeHeldItem,
   resumeAllItems,
   resumeOneItem,
+  revokeSteering,
   steerHeldItem,
   wakeQueue,
 } from './queue.ts'
@@ -48,7 +41,6 @@ const UNAVAILABLE: QueueState = Object.freeze({
   paused: false,
   parked: Object.freeze([]),
   order: Object.freeze([]),
-  sent: Object.freeze([]),
   steering: Object.freeze([]),
 })
 
@@ -71,25 +63,11 @@ export class MessageQueueService extends TypertRemoteService {
           ctx.logger.warn(`message-queue: parking a paused submission failed: ${String(error)}`)
         }
       })
-      const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
-        const state = this.gateState(agent.id)
-        dropExpiredSent(state)
-        dropExpiredTombstones(state)
-        noteClaimedItem(state, message.id)
-        // Plugin-injected notices are not user sends and stay out of the Sends list.
-        if (message.source.kind === 'user') recordClaimedItem(state, message, turn)
-      })
-      const offSessionEvent = ctx.on('session/event', (session, event) => {
-        if (event.type !== 'user/message') return
-        const agent = this.agentOf(session.id)
-        if (agent === undefined) return
+      const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message }) => {
         const state = this.gates.get(agent.id)
         if (state === undefined) return
-        if (applyLateDelivery(agent, state, event.data.id, event.seq, REVOKED_NOTICE)) {
-          this.prune(agent)
-          return
-        }
-        recordDeliveredItem(state, event.data.id, event.seq)
+        noteClaimedItem(state, message.id)
+        this.prune(agent)
       })
       const offStatus = ctx.on('agent/status', ({ agent, status }) => {
         if (status !== 'idle') return
@@ -110,7 +88,6 @@ export class MessageQueueService extends TypertRemoteService {
       return () => {
         offInserted()
         offClaimed()
-        offSessionEvent()
         offStatus()
         offDisposed()
         this.restoreAll()
@@ -126,12 +103,6 @@ export class MessageQueueService extends TypertRemoteService {
   state(sessionId: string): QueueState {
     const agent = this.agentOf(sessionId)
     if (agent === undefined) return UNAVAILABLE
-    const state = this.gates.get(agent.id)
-    if (state !== undefined) {
-      dropExpiredSent(state)
-      dropExpiredTombstones(state)
-      this.prune(agent)
-    }
     return readQueueState(agent, this.gates.get(agent.id))
   }
 
@@ -254,7 +225,7 @@ export class MessageQueueService extends TypertRemoteService {
     const agent = this.requireAgent(sessionId)
     const state = this.gateState(agent.id)
     try {
-      revokeItem(agent, state, itemId, REVOKED_NOTICE)
+      revokeSteering(agent, state, itemId)
     } catch (error: unknown) {
       throw this.wireError(error, sessionId, itemId)
     }
@@ -348,13 +319,6 @@ export class MessageQueueService extends TypertRemoteService {
       return new RemoteError(
         'message-queue/steer-unavailable',
         'no running turn accepts steering',
-        { sessionId, itemId },
-      )
-    }
-    if (error instanceof RevokeExpiredError) {
-      return new RemoteError(
-        'message-queue/revoke-expired',
-        'the withdrawal window for this message has closed',
         { sessionId, itemId },
       )
     }

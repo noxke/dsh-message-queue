@@ -18,9 +18,6 @@ export const MESSAGE_QUEUE_PACKAGE = 'dsh-message-queue'
 /** Cordis service key and Typert wire namespace. */
 export const MESSAGE_QUEUE_NAMESPACE = 'messageQueue'
 
-/** How long after a message leaves the queue it can still be withdrawn. */
-export const REVOKE_WINDOW_MS = 15_000
-
 /** One queue item held by the plugin while its Session is paused. */
 export interface ParkedItem {
   /** Message identity in the owning Session. */
@@ -42,20 +39,6 @@ export interface SteeringItem {
   readonly content: readonly unknown[]
 }
 
-/** One message the queue already sent to the model, revocable while it is recent. */
-export interface SentItem {
-  /** Identity of the sent message. */
-  readonly id: string
-  /** Model-facing content blocks, JSON-safe. */
-  readonly content: readonly unknown[]
-  /** Turn that claimed the message. */
-  readonly turn: number
-  /** Whether the message already entered the model-visible surface. */
-  readonly delivered: boolean
-  /** Remaining withdrawal time in milliseconds, measured at projection time. */
-  readonly remainingMs: number
-}
-
 /** Observable state of one Session's queue. */
 export interface QueueState {
   /** Whether a live Agent exists for this Session. */
@@ -66,8 +49,6 @@ export interface QueueState {
   readonly parked: readonly ParkedItem[]
   /** Visible queue order: parked ids followed by `next-turn` ids. */
   readonly order: readonly string[]
-  /** Recently sent messages, newest last. */
-  readonly sent: readonly SentItem[]
   /** Steering messages still waiting for a step boundary; revocable without a notice. */
   readonly steering: readonly SteeringItem[]
 }
@@ -94,7 +75,7 @@ export interface MessageQueueRemote {
   pauseItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Restore one held item; under a queue-wide pause this sends it immediately. */
   resumeItem(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
-  /** Withdraw one recently sent message and return its text to the queue. */
+  /** Withdraw one steering message the model has not received yet. */
   revoke(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Pause the queue; every queued item is held until a queue-wide resume. */
   pause(sessionId: string): Promise<RemoteResult<QueueState>>
@@ -133,8 +114,6 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'message-queue/steer-unavailable': { readonly sessionId: string; readonly itemId: string }
     /** A held item edit carried no non-whitespace text. */
     'message-queue/invalid-content': { readonly sessionId: string; readonly itemId: string }
-    /** The withdrawal window for a sent message has closed. */
-    'message-queue/revoke-expired': { readonly sessionId: string; readonly itemId: string }
   }
 }
 
@@ -199,27 +178,6 @@ export const STEERING_ITEM_SCHEMA: TypertSchema = {
   },
 }
 
-/** Strict validator of one sent item. */
-export const SENT_ITEM_SCHEMA: TypertSchema = {
-  parse(value: unknown): SentItem {
-    if (!isRecord(value)) invalid('sentItem', 'an object')
-    const content = value.content
-    if (!Array.isArray(content)) invalid('sentItem.content', 'an array')
-    if (typeof value.turn !== 'number' || !Number.isSafeInteger(value.turn)) invalid('sentItem.turn', 'a safe integer')
-    if (typeof value.delivered !== 'boolean') invalid('sentItem.delivered', 'a boolean')
-    if (typeof value.remainingMs !== 'number' || !Number.isSafeInteger(value.remainingMs)) {
-      invalid('sentItem.remainingMs', 'a safe integer')
-    }
-    return {
-      id: readId(value.id, 'sentItem.id'),
-      content,
-      turn: value.turn,
-      delivered: value.delivered,
-      remainingMs: value.remainingMs,
-    }
-  },
-}
-
 /** Strict validator of {@link QueueState}. */
 export const QUEUE_STATE_SCHEMA: TypertSchema = {
   parse(value: unknown): QueueState {
@@ -233,7 +191,6 @@ export const QUEUE_STATE_SCHEMA: TypertSchema = {
       paused: value.paused,
       parked: parked.map((item, index) => readParkedItem(item, `queueState.parked[${index}]`)),
       order: readIdArray(value.order, 'queueState.order'),
-      sent: readArray(value.sent, 'queueState.sent').map(item => SENT_ITEM_SCHEMA.parse(item) as SentItem),
       steering: readArray(value.steering, 'queueState.steering')
         .map(item => STEERING_ITEM_SCHEMA.parse(item) as SteeringItem),
     }

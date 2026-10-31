@@ -114,7 +114,7 @@ describe('plugin mounting', () => {
   it('reports unavailable for a Session without a live Agent', async () => {
     const { ctx, service } = await mount()
     expect(service.state('missing')).toEqual({
-      available: false, paused: false, parked: [], order: [], sent: [], steering: [],
+      available: false, paused: false, parked: [], order: [], steering: [],
     })
     expect(() => service.move('missing', 'a', 0)).toThrowError(/has no live agent/)
     await ctx.fiber.dispose()
@@ -192,66 +192,6 @@ describe('plugin mounting', () => {
     fake.inbox.nextTurn.length = 0
     ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('a'), turn: 1 })
     expect(service.state('session-1').paused).toBe(true)
-    fake.releaseMaintenance()
-    await ctx.fiber.dispose()
-  })
-
-  it('tracks claimed messages and revokes a delivered one through a surface replacement', async () => {
-    const { ctx, service, agents } = await mount()
-    const fake = fakeAgent('session-1')
-    agents.set('session-1', fake)
-
-    ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('a'), turn: 3 })
-    expect(service.state('session-1').sent).toEqual([
-      expect.objectContaining({ id: 'a', turn: 3, delivered: false }),
-    ])
-
-    fake.status = 'idle'
-    ctx.emit('session/event', fake.agent.session, { type: 'user/message', data: message('a'), seq: 41 } as never)
-    expect(service.state('session-1').sent[0]?.delivered).toBe(true)
-
-    const after = service.revoke('session-1', 'a')
-    expect(after.sent).toEqual([])
-    expect(fake.inbox.nextTurn).toHaveLength(1)
-    expect(String(fake.inbox.nextTurn[0]?.id)).not.toBe('a')
-    expect(fake.appended).toHaveLength(1)
-    const appended = fake.appended[0] as { type: string; intent: { surfaceOp: { startSeq: number } } }
-    expect(appended.type).toBe('user/message')
-    expect(Number(appended.intent.surfaceOp.startSeq)).toBe(41)
-    fake.releaseMaintenance()
-    await ctx.fiber.dispose()
-  })
-
-  it('withdraws a pending steering message before a turn claims it', async () => {
-    const { ctx, service, agents } = await mount()
-    const fake = fakeAgent('session-1', [message('queued')])
-    fake.inbox.nextStep.push(message('steer'))
-    agents.set('session-1', fake)
-    expect(service.state('session-1').steering.map(item => item.id)).toEqual(['steer'])
-
-    const after = service.revoke('session-1', 'steer')
-    expect(fake.inbox.nextStep).toEqual([])
-    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['steer', 'queued'])
-    expect(after.steering).toEqual([])
-    expect(fake.appended).toHaveLength(0)
-    fake.releaseMaintenance()
-    await ctx.fiber.dispose()
-  })
-
-  it('upgrades a late delivery of a withdrawn claim through the mounted listener', async () => {
-    const { ctx, service, agents } = await mount()
-    const fake = fakeAgent('session-1')
-    agents.set('session-1', fake)
-
-    ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('a'), turn: 4 })
-    service.revoke('session-1', 'a')
-    expect(fake.inbox.nextTurn).toHaveLength(1)
-
-    const queuedId = String(fake.inbox.nextTurn[0]?.id)
-    ctx.emit('session/event', fake.agent.session, { type: 'user/message', data: message('a'), seq: 55 } as never)
-    expect(fake.appended).toHaveLength(1)
-    expect(String(fake.inbox.nextTurn[0]?.id ?? '')).not.toBe(queuedId)
-    expect(fake.inbox.nextTurn).toEqual([])
     fake.releaseMaintenance()
     await ctx.fiber.dispose()
   })
