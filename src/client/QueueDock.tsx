@@ -505,17 +505,6 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                   onKeyDown={event => { onHandleKeyDown(event, row) }}>
                   <GripIcon />
                 </button>
-                <button type="button" className="mq-action" data-pause-toggle=""
-                  aria-label={isParked
-                    ? (paused ? t('resumeSend') : t('resumeItem'))
-                    : t('pauseItem')}
-                  title={isParked
-                    ? (paused ? t('resumeSend') : t('resumeItem'))
-                    : t('pauseItem')}
-                  disabled={!queueMutable || rowBusy}
-                  onClick={() => { toggleRowPause(row) }}>
-                  {isParked ? <PlayIcon /> : <PauseIcon />}
-                </button>
                 {isParked && (
                   <span className="mq-badge" title={heldReason === 'manual' ? t('heldManual') : t('heldGlobal')}>
                     <PauseBadgeIcon />
@@ -562,6 +551,22 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                       onClick={() => { setEditing({ id: row.id, text: editableText, kind: row.kind }) }}>
                       <EditIcon />
                     </button>
+                    <button type="button" className="mq-action" aria-label={t('steer')}
+                      title={t('steer')} disabled={rowBusy}
+                      onClick={() => { void runState(row.id, () => queue.steer(row.id), t('steerFailed')) }}>
+                      <SendIcon />
+                    </button>
+                    <button type="button" className="mq-action" data-pause-toggle=""
+                      aria-label={isParked
+                        ? (paused ? t('resumeSend') : t('resumeItem'))
+                        : t('pauseItem')}
+                      title={isParked
+                        ? (paused ? t('resumeSend') : t('resumeItem'))
+                        : t('pauseItem')}
+                      disabled={rowBusy}
+                      onClick={() => { toggleRowPause(row) }}>
+                      {isParked ? <PlayIcon /> : <PauseIcon />}
+                    </button>
                     <button type="button" className="mq-action" aria-label={t('remove')} title={t('remove')}
                       disabled={rowBusy}
                       onClick={() => {
@@ -569,11 +574,6 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
                         else void runAction(row.id, { kind: 'remove' }, t('removeFailed'))
                       }}>
                       <TrashIcon />
-                    </button>
-                    <button type="button" className="mq-action" aria-label={t('steer')}
-                      title={t('steer')} disabled={rowBusy}
-                      onClick={() => { void runState(row.id, () => queue.steer(row.id), t('steerFailed')) }}>
-                      <SendIcon />
                     </button>
                   </span>
                 )}
