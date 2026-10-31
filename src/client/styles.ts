@@ -45,6 +45,7 @@ const CSS = `
 .mq-textarea:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-1px}
 .mq-editor-actions{display:flex;justify-content:flex-end;gap:2px}
 .mq-pending-row .mq-preview{color:var(--dsw-alias-label-tertiary)}
+.mq-steering-row .mq-status{color:var(--dsw-alias-label-secondary,inherit)}
 .mq-sent-row{opacity:.9}
 .mq-sent-row .mq-preview{color:var(--dsw-alias-label-tertiary)}
 .mq-sent-title{display:flex;align-items:center;gap:8px;padding:6px 12px 2px;color:var(--dsw-alias-label-tertiary);font:var(--dsw-font-xs-13)}

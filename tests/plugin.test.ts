@@ -113,7 +113,9 @@ describe('plugin mounting', () => {
 
   it('reports unavailable for a Session without a live Agent', async () => {
     const { ctx, service } = await mount()
-    expect(service.state('missing')).toEqual({ available: false, paused: false, parked: [], order: [], sent: [] })
+    expect(service.state('missing')).toEqual({
+      available: false, paused: false, parked: [], order: [], sent: [], steering: [],
+    })
     expect(() => service.move('missing', 'a', 0)).toThrowError(/has no live agent/)
     await ctx.fiber.dispose()
   })
@@ -216,6 +218,22 @@ describe('plugin mounting', () => {
     const appended = fake.appended[0] as { type: string; intent: { surfaceOp: { startSeq: number } } }
     expect(appended.type).toBe('user/message')
     expect(Number(appended.intent.surfaceOp.startSeq)).toBe(41)
+    fake.releaseMaintenance()
+    await ctx.fiber.dispose()
+  })
+
+  it('withdraws a pending steering message before a turn claims it', async () => {
+    const { ctx, service, agents } = await mount()
+    const fake = fakeAgent('session-1', [message('queued')])
+    fake.inbox.nextStep.push(message('steer'))
+    agents.set('session-1', fake)
+    expect(service.state('session-1').steering.map(item => item.id)).toEqual(['steer'])
+
+    const after = service.revoke('session-1', 'steer')
+    expect(fake.inbox.nextStep).toEqual([])
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['steer', 'queued'])
+    expect(after.steering).toEqual([])
+    expect(fake.appended).toHaveLength(0)
     fake.releaseMaintenance()
     await ctx.fiber.dispose()
   })

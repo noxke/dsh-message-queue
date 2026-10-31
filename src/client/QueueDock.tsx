@@ -36,6 +36,7 @@ import {
 const EMPTY_ITEMS: readonly InboxItem[] = []
 const EMPTY_PARKED: QueueState['parked'] = []
 const EMPTY_SENT: QueueState['sent'] = []
+const EMPTY_STEERING: QueueState['steering'] = []
 /** Distance from a list edge that starts auto-scrolling during a drag. */
 const AUTOSCROLL_EDGE_PX = 24
 
@@ -230,6 +231,7 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
   }, [pendingSubmissions, queued])
 
   const sentItems = remoteState?.sent ?? EMPTY_SENT
+  const steeringItems = remoteState?.steering ?? EMPTY_STEERING
   const clockMs = Math.max(clock, stateAt)
   const sentRows = sentItems.flatMap(item => {
     const remaining = item.remainingMs - Math.max(0, clockMs - stateAt)
@@ -438,9 +440,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
     void commitMove(row.id, target)
   }
 
-  if (rowCount === 0 && sentRows.length === 0 && !paused) return null
+  if (rowCount === 0 && steeringItems.length === 0 && sentRows.length === 0 && !paused) return null
 
-  if (rowCount === 0 && sentRows.length === 0) {
+  if (rowCount === 0 && steeringItems.length === 0 && sentRows.length === 0) {
     return (
       <div className="mq-dock">
         <div className="mq-panel">
@@ -477,7 +479,9 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
             <span className="mq-lead"><QueueIcon /></span>
             <span className="mq-count">
               {rowCount === 0
-                ? t('sentTitle', { n: sentRows.length })
+                ? steeringItems.length > 0
+                  ? t('steeringTitle', { n: steeringItems.length })
+                  : t('sentTitle', { n: sentRows.length })
                 : paused ? t('paused', { n: rowCount }) : t('count', { n: rowCount })}
             </span>
             {!listVisible && pendingQueue.length > 0 && <span className="mq-status">{t('sending')}</span>}
@@ -600,6 +604,21 @@ export function QueueDock(props: QueueDockProps): ReactElement | null {
               <PendingAttachments attachments={submission.attachments} />
               <span className="mq-preview">{submission.text}</span>
               <span className="mq-status" role="status">{t('sending')}</span>
+            </li>
+          ))}
+          {listVisible && steeringItems.map(item => (
+            <li key={`steer:${item.id}`} className="mq-row mq-steering-row" data-mq-row="" data-steering="">
+              <span className="mq-badge" aria-hidden><SendIcon /></span>
+              <Attachments content={item.content} loadImage={loadImage} t={t} />
+              <Preview content={item.content} t={t} />
+              <span className="mq-status">{t('steeringPending')}</span>
+              <span className="mq-actions">
+                <button type="button" className="mq-action" aria-label={t('revokeSteering')}
+                  title={t('revokeSteering')} disabled={busy !== null}
+                  onClick={() => { void runState(item.id, () => queue.revoke(item.id), t('revokeFailed')) }}>
+                  <UndoIcon />
+                </button>
+              </span>
             </li>
           ))}
           {listVisible && sentRows.map(({ item, remaining }) => (

@@ -26,7 +26,7 @@ import {
   recordDeliveredItem,
   REVOKED_NOTICE,
   RevokeExpiredError,
-  revokeSentItem,
+  revokeItem,
   pauseOneItem,
   readQueueState,
   releaseQueueGate,
@@ -47,6 +47,7 @@ const UNAVAILABLE: QueueState = Object.freeze({
   parked: Object.freeze([]),
   order: Object.freeze([]),
   sent: Object.freeze([]),
+  steering: Object.freeze([]),
 })
 
 /** Pending message queue control exposed over the `messageQueue` Typert namespace. */
@@ -242,10 +243,9 @@ export class MessageQueueService extends TypertRemoteService {
    */
   revoke(sessionId: string, itemId: string): QueueState {
     const agent = this.requireAgent(sessionId)
-    const state = this.gates.get(agent.id)
+    const state = this.gateState(agent.id)
     try {
-      if (state === undefined) throw new ItemNotFoundError()
-      revokeSentItem(agent, state, itemId, REVOKED_NOTICE)
+      revokeItem(agent, state, itemId, REVOKED_NOTICE)
     } catch (error: unknown) {
       throw this.wireError(error, sessionId, itemId)
     }

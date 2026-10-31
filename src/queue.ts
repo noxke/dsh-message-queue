@@ -12,7 +12,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionSeq } from '@deepseek-ai/dsh-session'
 import { REVOKE_WINDOW_MS } from './wire.ts'
-import type { ParkedItem, QueueOrder, QueueState, SentItem } from './wire.ts'
+import type { ParkedItem, QueueOrder, QueueState, SentItem, SteeringItem } from './wire.ts'
 
 /** Why an item is held: an explicit per-item pause or the queue-wide pause. */
 export type PauseReason = 'manual' | 'global'
@@ -121,7 +121,35 @@ export function readQueueState(
     sent: (state?.sent ?? [])
       .map(record => sentItemOf(record, now))
       .filter((item): item is SentItem => item !== undefined),
+    steering: agent.inbox.nextStep.map(steeringItemOf),
   }
+}
+
+/** Project one pending steering message to its wire item. */
+function steeringItemOf(message: UserMessage): SteeringItem {
+  return {
+    id: String(message.id),
+    content: message.content as unknown as unknown[],
+  }
+}
+
+/**
+ * Withdraw one message before a turn claims it.
+ * A still-pending steering message leaves `next-step` and rejoins the queue;
+ * nothing reaches the model, so no withdrawal notice is written.
+ * @param agent - Agent owning the inbox.
+ * @param state - per-Session queue state.
+ * @param itemId - identity of the pending steering message.
+ * @returns whether the withdrawal came from the pending steering set.
+ * @throws {@link ItemNotFoundError} when the message is not pending in `next-step`.
+ */
+export function revokePendingSteering(agent: Agent, state: QueueGateState, itemId: string): boolean {
+  const index = agent.inbox.nextStep.findIndex(message => String(message.id) === itemId)
+  if (index < 0) return false
+  const removed = agent.inbox.splice('next-step', index, 1, [])
+  const message = removed[0]
+  if (message !== undefined) requeueMessage(agent, state, message)
+  return true
 }
 
 /** Project one sent record to its wire item while its window is open. */
@@ -234,6 +262,29 @@ export function revokeSentItem(
   }
   requeueMessage(agent, state, requeued)
   return 'replaced'
+}
+
+/**
+ * Withdraw one sent or pending-steering message.
+ * Pending steering rows are removed without a model notice and without a time
+ * limit; claimed messages keep the delivery-aware behavior and 15s window.
+ * @param agent - Agent owning the queue.
+ * @param state - per-Session queue state.
+ * @param itemId - identity of the message to withdraw.
+ * @param notice - model-facing withdrawal text for delivered messages.
+ * @param now - wall-clock time for the claimed-message window.
+ * @returns how the message was withdrawn.
+ * @throws {@link ItemNotFoundError} when the message is neither pending nor recent.
+ */
+export function revokeItem(
+  agent: Agent,
+  state: QueueGateState,
+  itemId: string,
+  notice: string,
+  now: number = Date.now(),
+): 'steering' | 'requeued' | 'replaced' {
+  if (revokePendingSteering(agent, state, itemId)) return 'steering'
+  return revokeSentItem(agent, state, itemId, notice, now)
 }
 
 /**

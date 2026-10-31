@@ -26,6 +26,8 @@ import {
   recordDeliveredItem,
   REVOKED_NOTICE,
   RevokeExpiredError,
+  revokeItem,
+  revokePendingSteering,
   revokeSentItem,
   releaseQueueGate,
   removeHeldItem,
@@ -356,6 +358,35 @@ describe('revocation', () => {
 
   it('rejects revoking an item outside the recent list', () => {
     expect(() => revokeSentItem(fakeAgent().agent, createQueueGateState(), 'missing', REVOKED_NOTICE))
+      .toThrow(ItemNotFoundError)
+  })
+})
+
+describe('pending steering withdrawal', () => {
+  it('removes a pending steering message and returns it to the queue without a notice', () => {
+    const fake = fakeAgent([message('queued')])
+    fake.inbox.nextStep.push(message('steer', 'inserted task'))
+    const state = createQueueGateState()
+    expect(revokeItem(fake.agent, state, 'steer', REVOKED_NOTICE)).toBe('steering')
+    expect(fake.inbox.nextStep).toEqual([])
+    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['steer', 'queued'])
+    expect(fake.appended).toHaveLength(0)
+  })
+
+  it('holds the withdrawn steering message while the queue is paused', () => {
+    const fake = fakeAgent()
+    fake.inbox.nextStep.push(message('steer'))
+    const state = createQueueGateState()
+    state.globalPaused = true
+    expect(revokePendingSteering(fake.agent, state, 'steer')).toBe(true)
+    expect(fake.inbox.nextTurn).toEqual([])
+    expect(state.held[0]?.reason).toBe('global')
+    expect(String(state.held[0]?.message.id)).toBe('steer')
+  })
+
+  it('reports a steering identity that is no longer pending', () => {
+    expect(revokePendingSteering(fakeAgent().agent, createQueueGateState(), 'missing')).toBe(false)
+    expect(() => revokeItem(fakeAgent().agent, createQueueGateState(), 'missing', REVOKED_NOTICE))
       .toThrow(ItemNotFoundError)
   })
 })

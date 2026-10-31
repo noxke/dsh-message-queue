@@ -34,6 +34,14 @@ export interface ParkedItem {
   readonly reason: 'manual' | 'global'
 }
 
+/** One steering message waiting for the running turn's next step boundary. */
+export interface SteeringItem {
+  /** Identity of the pending steering message. */
+  readonly id: string
+  /** Model-facing content blocks, JSON-safe. */
+  readonly content: readonly unknown[]
+}
+
 /** One message the queue already sent to the model, revocable while it is recent. */
 export interface SentItem {
   /** Identity of the sent message. */
@@ -60,6 +68,8 @@ export interface QueueState {
   readonly order: readonly string[]
   /** Recently sent messages, newest last. */
   readonly sent: readonly SentItem[]
+  /** Steering messages still waiting for a step boundary; revocable without a notice. */
+  readonly steering: readonly SteeringItem[]
 }
 
 /** New `next-turn` order after one move. */
@@ -179,6 +189,16 @@ export const PARKED_ITEM_SCHEMA: TypertSchema = {
   },
 }
 
+/** Strict validator of one pending steering item. */
+export const STEERING_ITEM_SCHEMA: TypertSchema = {
+  parse(value: unknown): SteeringItem {
+    if (!isRecord(value)) invalid('steeringItem', 'an object')
+    const content = value.content
+    if (!Array.isArray(content)) invalid('steeringItem.content', 'an array')
+    return { id: readId(value.id, 'steeringItem.id'), content }
+  },
+}
+
 /** Strict validator of one sent item. */
 export const SENT_ITEM_SCHEMA: TypertSchema = {
   parse(value: unknown): SentItem {
@@ -214,6 +234,8 @@ export const QUEUE_STATE_SCHEMA: TypertSchema = {
       parked: parked.map((item, index) => readParkedItem(item, `queueState.parked[${index}]`)),
       order: readIdArray(value.order, 'queueState.order'),
       sent: readArray(value.sent, 'queueState.sent').map(item => SENT_ITEM_SCHEMA.parse(item) as SentItem),
+      steering: readArray(value.steering, 'queueState.steering')
+        .map(item => STEERING_ITEM_SCHEMA.parse(item) as SteeringItem),
     }
   },
 }

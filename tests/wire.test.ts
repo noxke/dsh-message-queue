@@ -81,12 +81,14 @@ describe('strict codecs', () => {
       parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
       sent: [{ id: 's', content: [], turn: 2, delivered: true, remainingMs: 9000 }],
+      steering: [{ id: 't', content: [] }],
     })).toEqual({
       available: true,
       paused: true,
       parked: [{ id: 'a', content: [{ type: 'text', text: 'hello' }], reason: 'global' }],
       order: ['a'],
       sent: [{ id: 's', content: [], turn: 2, delivered: true, remainingMs: 9000 }],
+      steering: [{ id: 't', content: [] }],
     })
     expect(() => codec.create().parse({ available: true, paused: 'yes', parked: [], order: [] })).toThrow()
   })
@@ -103,7 +105,8 @@ describe('strict codecs', () => {
 
   it('exposes the order schema the Host returns', () => {
     expect(QUEUE_ORDER_SCHEMA.parse({ order: ['a', 'b'] })).toEqual({ order: ['a', 'b'] })
-    expect(QUEUE_STATE_SCHEMA.parse({ available: false, paused: false, parked: [], order: [], sent: [] }))
-      .toEqual({ available: false, paused: false, parked: [], order: [], sent: [] })
+    expect(QUEUE_STATE_SCHEMA.parse({
+      available: false, paused: false, parked: [], order: [], sent: [], steering: [],
+    })).toEqual({ available: false, paused: false, parked: [], order: [], sent: [], steering: [] })
   })
 })

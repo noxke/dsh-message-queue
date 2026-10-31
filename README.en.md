@@ -1,6 +1,6 @@
 # dsh-message-queue
 
-[中文](README.md) | English
+English | [简体中文](README.md)
 
 Drag-to-reorder and pause/resume for the DeepSeek Harness pending message queue.
 
@@ -57,6 +57,9 @@ dsh plugin --profile <profile> add link:"$PWD"
   front of the queue. A message the model has not seen yet returns
   unchanged; one the model already saw gains a model-visible replacement that says the user
   withdrew it, while the chat transcript keeps the original text.
+- **Withdraw pending steering.** A steering message still waiting for a step boundary is listed
+  separately and can be withdrawn at any time: it leaves `next-step`, rejoins the queue, and
+  never reaches the model, so no notice is written and the running task is unaffected.
 
 ## Limits
 
@@ -72,8 +75,10 @@ dsh plugin --profile <profile> add link:"$PWD"
 - Rows reorder inside their own group: held rows first, queued rows after them.
 - The dock opens expanded; a single queued row collapses like any other list.
 - Steering input (`next-step`) is not listed by the panel.
-- Withdrawal covers the last 15 seconds of sends, up to five messages. The window between
-  claiming a message and its delivery to the model is short, so that branch is best-effort.
+- The 15-second window and five-message cap apply only to already claimed messages; pending
+  steering messages have no time limit.
+- The window between claiming a message and its delivery to the model is short, so that branch
+  of withdrawal is best-effort.
 - Pause state is written per Session and refreshed on mount, on window focus, and every
   few seconds while paused; two browser tabs converge on the host answer.
 
