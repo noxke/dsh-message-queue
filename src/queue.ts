@@ -27,6 +27,10 @@ export interface HeldItem {
 
 /** Recent sent messages kept for withdrawal, newest last. */
 const MAX_SENT_ITEMS = 5
+/** How long an undelivered withdrawal waits for a late delivery to appear. */
+const TOMBSTONE_TTL_MS = 60_000
+/** Withdrawals waiting for a message that may still be delivered. */
+const MAX_TOMBSTONES = 8
 
 /** One recently sent message plus the surface seq it landed at, when known. */
 export interface SentRecord {
@@ -42,6 +46,16 @@ export interface SentRecord {
 export const REVOKED_NOTICE = 'The user withdrew their previous message. Disregard its content and do not act on it.'
 
 /** Per-Session pause state owned by the plugin while a queue or item is paused. */
+/** One withdrawal of a claimed message that had not reached the model yet. */
+export interface RevokeTombstone {
+  /** Identity the model may still receive. */
+  readonly originalId: string
+  /** Identity of the queue copy that replaced the withdrawn send. */
+  readonly requeuedId: string
+  /** Wall-clock time the withdrawal happened. */
+  readonly createdAt: number
+}
+
 export interface QueueGateState {
   /** Whether the queue-wide pause holds automatic sending. */
   globalPaused: boolean
@@ -54,6 +68,8 @@ export interface QueueGateState {
   bypass: string | null
   /** Recently sent messages the panel can still withdraw. */
   sent: SentRecord[]
+  /** Undelivered withdrawals still waiting for a possible late delivery. */
+  tombstones: RevokeTombstone[]
   /** Reentrancy guard around splices this module performs itself. */
   mutating: boolean
 }
@@ -67,6 +83,7 @@ export function createQueueGateState(): QueueGateState {
     gateOpen: false,
     bypass: null,
     sent: [],
+    tombstones: [],
     mutating: false,
   }
 }
@@ -78,6 +95,7 @@ export function isIdleState(state: QueueGateState): boolean {
     && !state.gateOpen
     && state.bypass === null
     && state.sent.length === 0
+    && state.tombstones.length === 0
 }
 
 /** Project one live message to its wire queue item. */
@@ -175,6 +193,15 @@ export function dropExpiredSent(state: QueueGateState, now: number = Date.now())
 }
 
 /**
+ * Drop withdrawals that waited too long for a delivery that never came.
+ * @param state - per-Session queue state.
+ * @param now - wall-clock time to measure against.
+ */
+export function dropExpiredTombstones(state: QueueGateState, now: number = Date.now()): void {
+  state.tombstones = state.tombstones.filter(item => now - item.createdAt < TOMBSTONE_TTL_MS)
+}
+
+/**
  * Remember one message a turn just claimed.
  * @param state - per-Session queue state.
  * @param message - claimed message.
@@ -240,11 +267,38 @@ export function revokeSentItem(
   const record = state.sent[index] as SentRecord
   if (now - record.claimedAt >= REVOKE_WINDOW_MS) throw new RevokeExpiredError()
   state.sent.splice(index, 1)
+  const requeued = cloneForRequeue(record.message)
+  dropExpiredTombstones(state, now)
   if (record.seq === null) {
-    requeueMessage(agent, state, record.message)
+    // The claim may still deliver this message to the model. Keep the original
+    // identity on watch so a late delivery gains a withdrawal notice and the
+    // queue copy is dropped instead of running twice.
+    requeueMessage(agent, state, requeued)
+    state.tombstones.push({
+      originalId: String(record.message.id),
+      requeuedId: String(requeued.id),
+      createdAt: now,
+    })
+    while (state.tombstones.length > MAX_TOMBSTONES) state.tombstones.shift()
     return 'requeued'
   }
-  const seq = record.seq as unknown as SessionSeq
+  appendWithdrawal(agent, record.seq, notice)
+  requeueMessage(agent, state, requeued)
+  return 'replaced'
+}
+
+/** Copy one message for re-sending under a fresh identity. */
+function cloneForRequeue(message: UserMessage): UserMessage {
+  return {
+    ...message,
+    id: randomUUID() as unknown as MessageId,
+    source: { kind: 'user' } as UserMessage['source'],
+  }
+}
+
+/** Append the model-visible replacement that withdraws one delivered message. */
+function appendWithdrawal(agent: Agent, seq: number, notice: string): void {
+  const target = seq as unknown as SessionSeq
   const replacement: UserMessage = {
     id: randomUUID() as unknown as MessageId,
     role: 'user',
@@ -252,16 +306,55 @@ export function revokeSentItem(
     source: { kind: 'runtime-context' } as unknown as UserMessage['source'],
   }
   agent.session.append('user/message', replacement, {
-    surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq },
-    sourceEventSeqs: [seq],
+    surfaceOp: { op: 'replace', startSeq: target, endSeq: target },
+    sourceEventSeqs: [target],
   })
-  const requeued: UserMessage = {
-    ...record.message,
-    id: randomUUID() as unknown as MessageId,
-    source: { kind: 'user' } as UserMessage['source'],
+}
+
+/** Remove one pending queue copy wherever it currently waits. */
+function dropPendingCopy(agent: Agent, state: QueueGateState, id: string): boolean {
+  const nextTurn = agent.inbox.nextTurn.findIndex(message => String(message.id) === id)
+  if (nextTurn >= 0) {
+    agent.inbox.splice('next-turn', nextTurn, 1, [])
+    return true
   }
-  requeueMessage(agent, state, requeued)
-  return 'replaced'
+  const nextStep = agent.inbox.nextStep.findIndex(message => String(message.id) === id)
+  if (nextStep >= 0) {
+    agent.inbox.splice('next-step', nextStep, 1, [])
+    return true
+  }
+  const held = state.held.findIndex(item => String(item.message.id) === id)
+  if (held >= 0) {
+    state.held.splice(held, 1)
+    return true
+  }
+  return false
+}
+
+/**
+ * Apply a withdrawal whose original message reached the model after the user
+ * already withdrew it. The late delivery gains the replacement notice and the
+ * queue copy that stood in for it is removed.
+ * @param agent - Agent owning the Session.
+ * @param state - per-Session queue state.
+ * @param messageId - identity of the message that just entered the surface.
+ * @param seq - log seq of its model-visible event.
+ * @param notice - model-facing withdrawal text.
+ * @returns whether a pending withdrawal handled this delivery.
+ */
+export function applyLateDelivery(
+  agent: Agent,
+  state: QueueGateState,
+  messageId: MessageId,
+  seq: number,
+  notice: string,
+): boolean {
+  const index = state.tombstones.findIndex(item => item.originalId === String(messageId))
+  if (index < 0) return false
+  const tombstone = state.tombstones.splice(index, 1)[0] as RevokeTombstone
+  appendWithdrawal(agent, seq, notice)
+  dropPendingCopy(agent, state, tombstone.requeuedId)
+  return true
 }
 
 /**

@@ -14,6 +14,8 @@
 - Open the dock expanded and allow collapsing a queue that holds a single row.
 - Withdraw a steering message while it still waits in `next-step`: it returns to the queue
   without a model notice and without touching the running task.
+- Track withdrawals of not-yet-delivered sends: a late delivery gains the withdrawal notice and
+  its duplicate queue copy is dropped instead of running the task twice.
 - Withdraw a send within 15 seconds from the panel: undelivered messages return to the queue,
   delivered messages gain a model-visible withdrawal replacement and their text rejoins the
   queue. The row shows the remaining window and disappears once it closes.

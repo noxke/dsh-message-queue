@@ -13,6 +13,7 @@ import {
   ItemNotFoundError,
   SteerUnavailableError,
   createQueueGateState,
+  applyLateDelivery,
   editHeldItem,
   isIdleState,
   moveQueueRow,
@@ -295,15 +296,40 @@ describe('held row operations', () => {
 })
 
 describe('revocation', () => {
-  it('returns an undelivered message to the queue unchanged', () => {
+  it('returns an undelivered message to the queue under a fresh identity', () => {
     const fake = fakeAgent()
     const state = createQueueGateState()
     recordClaimedItem(state, message('a', 'original'), 2)
     expect(state.sent[0]?.seq).toBeNull()
     expect(revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)).toBe('requeued')
-    expect(fake.inbox.nextTurn.map(item => String(item.id))).toEqual(['a'])
+    expect(fake.inbox.nextTurn).toHaveLength(1)
+    expect(String(fake.inbox.nextTurn[0]?.id)).not.toBe('a')
     expect(fake.appended).toHaveLength(0)
     expect(state.sent).toHaveLength(0)
+    expect(state.tombstones).toHaveLength(1)
+  })
+
+  it('upgrades a late delivery to a withdrawal and drops the queue copy', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    recordClaimedItem(state, message('a', 'original'), 2)
+    revokeSentItem(fake.agent, state, 'a', REVOKED_NOTICE)
+    expect(fake.inbox.nextTurn).toHaveLength(1)
+
+    expect(applyLateDelivery(fake.agent, state, 'a' as unknown as MessageId, 33, REVOKED_NOTICE)).toBe(true)
+    expect(fake.appended).toHaveLength(1)
+    const intent = fake.appended[0]?.intent as { surfaceOp: { op: string; startSeq: number } }
+    expect(intent.surfaceOp.op).toBe('replace')
+    expect(Number(intent.surfaceOp.startSeq)).toBe(33)
+    expect(fake.inbox.nextTurn).toEqual([])
+    expect(state.tombstones).toHaveLength(0)
+  })
+
+  it('ignores a delivery that matches no pending withdrawal', () => {
+    const fake = fakeAgent()
+    const state = createQueueGateState()
+    expect(applyLateDelivery(fake.agent, state, 'none' as unknown as MessageId, 1, REVOKED_NOTICE)).toBe(false)
+    expect(fake.appended).toHaveLength(0)
   })
 
   it('replaces a delivered message in the model surface and requeues its text', () => {

@@ -238,6 +238,24 @@ describe('plugin mounting', () => {
     await ctx.fiber.dispose()
   })
 
+  it('upgrades a late delivery of a withdrawn claim through the mounted listener', async () => {
+    const { ctx, service, agents } = await mount()
+    const fake = fakeAgent('session-1')
+    agents.set('session-1', fake)
+
+    ctx.emit('agent/inbox/claimed', { agent: fake.agent, message: message('a'), turn: 4 })
+    service.revoke('session-1', 'a')
+    expect(fake.inbox.nextTurn).toHaveLength(1)
+
+    const queuedId = String(fake.inbox.nextTurn[0]?.id)
+    ctx.emit('session/event', fake.agent.session, { type: 'user/message', data: message('a'), seq: 55 } as never)
+    expect(fake.appended).toHaveLength(1)
+    expect(String(fake.inbox.nextTurn[0]?.id ?? '')).not.toBe(queuedId)
+    expect(fake.inbox.nextTurn).toEqual([])
+    fake.releaseMaintenance()
+    await ctx.fiber.dispose()
+  })
+
   it('reopens the gate when an idle Agent returns to the paused queue', async () => {
     const { ctx, service, agents } = await mount()
     const fake = fakeAgent('session-1', [message('a')])

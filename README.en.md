@@ -77,8 +77,9 @@ dsh plugin --profile <profile> add link:"$PWD"
 - Steering input (`next-step`) is not listed by the panel.
 - The 15-second window and five-message cap apply only to already claimed messages; pending
   steering messages have no time limit.
-- The window between claiming a message and its delivery to the model is short, so that branch
-  of withdrawal is best-effort.
+- The window between claiming a message and its delivery to the model is short: withdrawing in
+  that window requeues the text first, and if the delivery still lands the withdrawal notice is
+  appended and the duplicate queue copy is dropped, so the task does not run twice.
 - Pause state is written per Session and refreshed on mount, on window focus, and every
   few seconds while paused; two browser tabs converge on the host answer.
 

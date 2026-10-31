@@ -13,8 +13,10 @@ import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protoc
 import {
   ItemNotFoundError,
   SteerUnavailableError,
+  applyLateDelivery,
   createQueueGateState,
   dropExpiredSent,
+  dropExpiredTombstones,
   editHeldItem,
   isIdleState,
   moveQueueRow,
@@ -72,6 +74,7 @@ export class MessageQueueService extends TypertRemoteService {
       const offClaimed = ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
         const state = this.gateState(agent.id)
         dropExpiredSent(state)
+        dropExpiredTombstones(state)
         noteClaimedItem(state, message.id)
         recordClaimedItem(state, message, turn)
       })
@@ -81,6 +84,10 @@ export class MessageQueueService extends TypertRemoteService {
         if (agent === undefined) return
         const state = this.gates.get(agent.id)
         if (state === undefined) return
+        if (applyLateDelivery(agent, state, event.data.id, event.seq, REVOKED_NOTICE)) {
+          this.prune(agent)
+          return
+        }
         recordDeliveredItem(state, event.data.id, event.seq)
       })
       const offStatus = ctx.on('agent/status', ({ agent, status }) => {
@@ -121,6 +128,7 @@ export class MessageQueueService extends TypertRemoteService {
     const state = this.gates.get(agent.id)
     if (state !== undefined) {
       dropExpiredSent(state)
+      dropExpiredTombstones(state)
       this.prune(agent)
     }
     return readQueueState(agent, this.gates.get(agent.id))
