@@ -125,6 +125,9 @@ export interface QueueDockInjected {
   readonly queue: {
     state(): Promise<import('../wire.ts').QueueState>
     move(itemId: string, toIndex: number): Promise<import('../wire.ts').QueueOrder>
+    edit(itemId: string, text: string): Promise<import('../wire.ts').QueueState>
+    remove(itemId: string): Promise<import('../wire.ts').QueueState>
+    steer(itemId: string): Promise<import('../wire.ts').QueueState>
     pause(): Promise<import('../wire.ts').QueueState>
     resume(): Promise<import('../wire.ts').QueueState>
   }

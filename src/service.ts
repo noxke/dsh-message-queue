@@ -11,13 +11,17 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import {
   ItemNotFoundError,
+  SteerUnavailableError,
   closeQueueGate,
   createQueueGateState,
-  moveQueueItem,
+  editParkedItem,
+  moveQueueRow,
   openQueueGate,
   parkInsertedMessage,
   parkQueuedTurns,
   readQueueState,
+  removeParkedItem,
+  steerParkedItem,
 } from './queue.ts'
 import type { QueueGateState } from './queue.ts'
 import { MESSAGE_QUEUE_NAMESPACE } from './wire.ts'
@@ -94,17 +98,84 @@ export class MessageQueueService extends TypertRemoteService {
   move(sessionId: string, itemId: string, toIndex: number): QueueOrder {
     const agent = this.requireAgent(sessionId)
     try {
-      return moveQueueItem(agent, itemId, toIndex)
+      return moveQueueRow(agent, this.gates.get(agent.id), itemId, toIndex)
     } catch (error: unknown) {
-      if (error instanceof ItemNotFoundError) {
-        throw new RemoteError(
-          'message-queue/item-not-found',
-          `queue item "${itemId}" is no longer pending`,
-          { sessionId, itemId },
-        )
-      }
-      throw error
+      throw this.wireError(error, sessionId, itemId)
     }
+  }
+
+  /**
+   * Replace one held item's text.
+   * @param sessionId - Session identity.
+   * @param itemId - identity of the held row.
+   * @param text - non-empty replacement text.
+   * @returns the queued state after the edit.
+   */
+  edit(sessionId: string, itemId: string, text: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    if (text.trim() === '') {
+      throw new RemoteError('message-queue/invalid-content', 'queued edit text must not be blank', { sessionId, itemId })
+    }
+    const state = this.gates.get(agent.id)
+    try {
+      editParkedItem(state, itemId, text)
+    } catch (error: unknown) {
+      throw this.wireError(error, sessionId, itemId)
+    }
+    return readQueueState(agent, state)
+  }
+
+  /**
+   * Remove one held item.
+   * @param sessionId - Session identity.
+   * @param itemId - identity of the held row.
+   * @returns the queued state after the removal.
+   */
+  remove(sessionId: string, itemId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gates.get(agent.id)
+    try {
+      removeParkedItem(state, itemId)
+    } catch (error: unknown) {
+      throw this.wireError(error, sessionId, itemId)
+    }
+    return readQueueState(agent, state)
+  }
+
+  /**
+   * Send one held item into the running turn.
+   * @param sessionId - Session identity.
+   * @param itemId - identity of the held row.
+   * @returns the queued state after the item left the held list.
+   */
+  steer(sessionId: string, itemId: string): QueueState {
+    const agent = this.requireAgent(sessionId)
+    const state = this.gates.get(agent.id)
+    try {
+      steerParkedItem(agent, state, itemId)
+    } catch (error: unknown) {
+      throw this.wireError(error, sessionId, itemId)
+    }
+    return readQueueState(agent, state)
+  }
+
+  /** Map a queue mutation failure to its wire error. */
+  private wireError(error: unknown, sessionId: string, itemId: string): unknown {
+    if (error instanceof ItemNotFoundError) {
+      return new RemoteError(
+        'message-queue/item-not-found',
+        `queue item "${itemId}" is no longer pending`,
+        { sessionId, itemId },
+      )
+    }
+    if (error instanceof SteerUnavailableError) {
+      return new RemoteError(
+        'message-queue/steer-unavailable',
+        'no running turn accepts steering',
+        { sessionId, itemId },
+      )
+    }
+    return error
   }
 
   /**

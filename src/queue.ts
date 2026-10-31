@@ -37,6 +37,21 @@ function parkedItemOf(message: UserMessage): ParkedItem {
 }
 
 /**
+ * Visible queue identity order: items held by the pause gate first, then the
+ * inbox's pending turns.
+ * @param agent - Agent whose inbox is read.
+ * @param state - per-Session pause state, absent when the queue is not paused.
+ * @returns the identity sequence the panel renders.
+ */
+export function visibleOrder(agent: Agent, state: QueueGateState | undefined): string[] {
+  const parked = state?.parked ?? []
+  return [
+    ...parked.map(message => String(message.id)),
+    ...agent.inbox.nextTurn.map(message => String(message.id)),
+  ]
+}
+
+/**
  * Read the queue state of one Agent, optionally including a live pause gate.
  * @param agent - Agent whose inbox is the queue.
  * @param state - per-Session pause state, absent when the queue is not paused.
@@ -44,24 +59,40 @@ function parkedItemOf(message: UserMessage): ParkedItem {
  */
 export function readQueueState(agent: Agent, state: QueueGateState | undefined): QueueState {
   const parked = state?.parked ?? []
-  const queued = agent.inbox.nextTurn
   return {
     available: true,
     paused: state?.paused === true,
     parked: parked.map(parkedItemOf),
-    order: [...parked.map(message => String(message.id)), ...queued.map(message => String(message.id))],
+    order: visibleOrder(agent, state),
   }
 }
 
 /**
- * Move one pending turn item to a new index.
+ * Move one visible queue row. A held (parked) item moves inside the held list;
+ * a pending turn moves inside `next-turn`. Cross-group moves are rejected by
+ * the panel, which keeps each index inside its own group.
  * @param agent - Agent owning the queue.
- * @param itemId - identity of the message to move.
- * @param toIndex - requested destination; clamped into `[0, length - 1]`.
- * @returns the new `next-turn` identity order.
- * @throws when the message is no longer pending.
+ * @param state - per-Session pause state, absent when the queue is not paused.
+ * @param itemId - identity of the row to move.
+ * @param toIndex - destination index inside the row's own group; clamped.
+ * @returns the complete visible identity order after the move.
+ * @throws {@link ItemNotFoundError} when the identity is neither held nor queued.
  */
-export function moveQueueItem(agent: Agent, itemId: string, toIndex: number): QueueOrder {
+export function moveQueueRow(
+  agent: Agent,
+  state: QueueGateState | undefined,
+  itemId: string,
+  toIndex: number,
+): QueueOrder {
+  const held = state?.paused === true ? state.parked : []
+  const heldIndex = held.findIndex(message => String(message.id) === itemId)
+  if (heldIndex >= 0) {
+    const target = Math.min(Math.max(Math.trunc(toIndex), 0), held.length - 1)
+    const moved = held[heldIndex] as UserMessage
+    held.splice(heldIndex, 1)
+    held.splice(target, 0, moved)
+    return { order: visibleOrder(agent, state) }
+  }
   const current = [...agent.inbox.nextTurn]
   const from = current.findIndex(message => String(message.id) === itemId)
   if (from < 0) throw new ItemNotFoundError()
@@ -69,15 +100,71 @@ export function moveQueueItem(agent: Agent, itemId: string, toIndex: number): Qu
   const moved = current[from] as UserMessage
   const order = current.toSpliced(from, 1).toSpliced(target, 0, moved)
   agent.inbox.splice('next-turn', 0, current.length, order)
-  return { order: order.map(message => String(message.id)) }
+  return { order: visibleOrder(agent, state) }
 }
 
-/** Raised when a queue mutation names an item the inbox no longer holds. */
+/** Raised when a queue mutation names an item neither held nor pending. */
 export class ItemNotFoundError extends Error {
   constructor() {
     super('queue item is no longer pending')
     this.name = 'ItemNotFoundError'
   }
+}
+
+/** Raised when steering a held item has no running turn to accept it. */
+export class SteerUnavailableError extends Error {
+  constructor() {
+    super('no running turn accepts steering')
+    this.name = 'SteerUnavailableError'
+  }
+}
+
+/** Locate one held item and require the pause state to exist. */
+function requireHeld(state: QueueGateState | undefined, itemId: string): { held: UserMessage[]; index: number } {
+  if (state === undefined) throw new ItemNotFoundError()
+  const held = state.parked
+  const index = held.findIndex(message => String(message.id) === itemId)
+  if (index < 0) throw new ItemNotFoundError()
+  return { held, index }
+}
+
+/**
+ * Replace one held item's text in place, preserving its identity and source.
+ * @param state - per-Session pause state.
+ * @param itemId - identity of the held row.
+ * @param text - non-empty replacement text.
+ * @throws {@link ItemNotFoundError} when the row is not held.
+ */
+export function editParkedItem(state: QueueGateState | undefined, itemId: string, text: string): void {
+  const { held, index } = requireHeld(state, itemId)
+  const current = held[index] as UserMessage
+  held[index] = { ...current, content: [{ type: 'text', text }] }
+}
+
+/**
+ * Drop one held item.
+ * @param state - per-Session pause state.
+ * @param itemId - identity of the held row.
+ * @throws {@link ItemNotFoundError} when the row is not held.
+ */
+export function removeParkedItem(state: QueueGateState | undefined, itemId: string): void {
+  const { held, index } = requireHeld(state, itemId)
+  held.splice(index, 1)
+}
+
+/**
+ * Send one held item into the running turn ahead of the queue.
+ * @param agent - Agent owning the queue.
+ * @param state - per-Session pause state.
+ * @param itemId - identity of the held row.
+ * @throws {@link ItemNotFoundError} when the row is not held.
+ * @throws {@link SteerUnavailableError} when no turn is running.
+ */
+export function steerParkedItem(agent: Agent, state: QueueGateState | undefined, itemId: string): void {
+  const { held, index } = requireHeld(state, itemId)
+  if (agent.status !== 'running') throw new SteerUnavailableError()
+  const [message] = held.splice(index, 1)
+  if (message !== undefined) agent.steer(message)
 }
 
 /**

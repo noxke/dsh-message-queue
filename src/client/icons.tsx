@@ -16,6 +16,17 @@ function Icon({ children, size = 14 }: { children: ReactNode; size?: number }): 
   )
 }
 
+/** Queue strip glyph used by the header lead. */
+export function QueueIcon(): ReactElement {
+  return (
+    <Icon>
+      <path d="M4 7h16" />
+      <path d="M4 12h16" />
+      <path d="M4 17h10" />
+    </Icon>
+  )
+}
+
 /** Drag handle: six dots. */
 export function GripIcon(): ReactElement {
   return (

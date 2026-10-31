@@ -1,20 +1,35 @@
 /**
- * Row-model behavior for the queue panel: merging parked and queued rows,
- * optimistic ordering, and drag-target resolution.
+ * Row-model behavior for the queue panel: merging held and queued rows,
+ * optimistic ordering, group-clamped moves, and drag-target resolution.
  * @module dsh-message-queue/tests/client-model
  */
 
 import { describe, expect, it } from 'vitest'
 import {
   dragTarget,
+  groupRange,
   matchesOrder,
   mergeRows,
   moveIds,
-  reorderQueued,
+  moveWithinGroup,
+  reorderRows,
+  stepTarget,
   textOf,
 } from '../src/client/model.ts'
 
 const text = (value: string) => [{ type: 'text', text: value }]
+
+/** Rows holding two parked items followed by three queued items. */
+function mixedRows() {
+  return mergeRows(
+    [{ id: 'p1', content: text('p1') }, { id: 'p2', content: text('p2') }],
+    [
+      { id: 'q1', content: text('q1') },
+      { id: 'q2', content: text('q2') },
+      { id: 'q3', content: text('q3') },
+    ],
+  )
+}
 
 describe('textOf', () => {
   it('joins text blocks and skips other block kinds', () => {
@@ -24,7 +39,7 @@ describe('textOf', () => {
 })
 
 describe('mergeRows', () => {
-  it('puts parked rows before queued rows and drops duplicates', () => {
+  it('puts held rows before queued rows and drops duplicates', () => {
     const rows = mergeRows(
       [{ id: 'a', content: text('parked') }],
       [{ id: 'a', content: text('stale') }, { id: 'b', content: text('queued') }],
@@ -33,19 +48,16 @@ describe('mergeRows', () => {
   })
 })
 
-describe('reorderQueued', () => {
-  it('reorders queued rows and preserves parked rows in front', () => {
-    const rows = mergeRows([{ id: 'p', content: text('p') }], [
-      { id: 'a', content: text('a') },
-      { id: 'b', content: text('b') },
-    ])
-    const reordered = reorderQueued(rows, ['b', 'a'])
-    expect(reordered.map(row => row.id)).toEqual(['p', 'b', 'a'])
+describe('reorderRows', () => {
+  it('reorders by identity and keeps every row', () => {
+    const rows = mixedRows()
+    expect(reorderRows(rows, ['q2', 'p1', 'q1', 'q3', 'p2']).map(row => row.id))
+      .toEqual(['q2', 'p1', 'q1', 'q3', 'p2'])
   })
 
-  it('leaves rows unchanged when the order is empty', () => {
-    const rows = mergeRows([], [{ id: 'a', content: text('a') }])
-    expect(reorderQueued(rows, []).map(row => row.id)).toEqual(['a'])
+  it('falls back to the current order when ids do not cover every row', () => {
+    const rows = mixedRows()
+    expect(reorderRows(rows, ['q1']).map(row => row.id)).toEqual(rows.map(row => row.id))
   })
 })
 
@@ -54,6 +66,42 @@ describe('moveIds', () => {
     expect(moveIds(['a', 'b', 'c'], 2, 0)).toEqual(['c', 'a', 'b'])
     expect(moveIds(['a', 'b', 'c'], 0, 99)).toEqual(['b', 'c', 'a'])
     expect(moveIds(['a'], 4, 0)).toEqual(['a'])
+  })
+})
+
+describe('groupRange', () => {
+  it('reports the inclusive indexes of each group', () => {
+    expect(groupRange(mixedRows(), 'parked')).toEqual({ start: 0, end: 1 })
+    expect(groupRange(mixedRows(), 'queued')).toEqual({ start: 2, end: 4 })
+    expect(groupRange([], 'queued')).toEqual({ start: 0, end: -1 })
+  })
+})
+
+describe('moveWithinGroup', () => {
+  it('moves a queued row inside its group', () => {
+    expect(moveWithinGroup(mixedRows(), 'q3', 2)).toEqual(['p1', 'p2', 'q3', 'q1', 'q2'])
+  })
+
+  it('moves a held row inside the held group', () => {
+    expect(moveWithinGroup(mixedRows(), 'p2', 0)).toEqual(['p2', 'p1', 'q1', 'q2', 'q3'])
+  })
+
+  it('clamps a queued row dragged above the queued group', () => {
+    expect(moveWithinGroup(mixedRows(), 'q1', 0)).toEqual(['p1', 'p2', 'q1', 'q2', 'q3'])
+  })
+
+  it('clamps a held row carried past the held group', () => {
+    expect(moveWithinGroup(mixedRows(), 'p1', 9)).toEqual(['p2', 'p1', 'q1', 'q2', 'q3'])
+  })
+})
+
+describe('stepTarget', () => {
+  it('returns the neighbour inside the group and undefined at its edge', () => {
+    const rows = mixedRows()
+    expect(stepTarget(rows, 'q2', -1)).toBe(2)
+    expect(stepTarget(rows, 'q1', -1)).toBeUndefined()
+    expect(stepTarget(rows, 'p1', 1)).toBe(1)
+    expect(stepTarget(rows, 'p2', 1)).toBeUndefined()
   })
 })
 
@@ -67,12 +115,9 @@ describe('dragTarget', () => {
 })
 
 describe('matchesOrder', () => {
-  it('compares only queued identities', () => {
-    const rows = mergeRows([{ id: 'p', content: text('p') }], [
-      { id: 'a', content: text('a') },
-      { id: 'b', content: text('b') },
-    ])
-    expect(matchesOrder(rows, ['a', 'b'])).toBe(true)
-    expect(matchesOrder(rows, ['b', 'a'])).toBe(false)
+  it('compares the complete visible sequence', () => {
+    const rows = mixedRows()
+    expect(matchesOrder(rows, ['p1', 'p2', 'q1', 'q2', 'q3'])).toBe(true)
+    expect(matchesOrder(rows, ['q1', 'q2', 'q3'])).toBe(false)
   })
 })

@@ -55,10 +55,11 @@ dsh plugin --profile <profile> add link:"$PWD"
   the panel read-only; the host service itself works for any live Agent.
 - Items held by a pause live in host memory. A host restart loses the pause flag and the
   held batch; a graceful plugin unload writes the batch back to the inbox.
-- A paused queue reports its held items and the inbox items, but held items can be
-  reordered or edited only after resuming.
-- Reordering applies to `next-turn` items; steering input (`next-step`) is not listed by
-  the panel.
+- Held rows stay interactive while the queue is paused: drag them, step them with the
+  ↑ / ↓ buttons, edit their text, remove them, or send one into a running turn with the
+  send button. The pause itself still holds the next automatic turn.
+- Rows reorder inside their own group: held rows first, queued rows after them.
+- Steering input (`next-step`) is not listed by the panel.
 - Pause state is written per Session and refreshed on mount, on window focus, and every
   few seconds while paused; two browser tabs converge on the host answer.
 

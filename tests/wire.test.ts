@@ -16,10 +16,13 @@ import {
 } from '../src/wire.ts'
 
 describe('invocation descriptors', () => {
-  it('exposes the four queue methods in the shared namespace', () => {
+  it('exposes every queue method in the shared namespace', () => {
     expect(MESSAGE_QUEUE_INVOCATIONS.map(item => item.method)).toEqual([
       'state',
       'move',
+      'edit',
+      'remove',
+      'steer',
       'pause',
       'resume',
     ])
@@ -39,6 +42,8 @@ describe('invocation descriptors', () => {
       'itemId',
       'toIndex',
     ])
+    const edit = MESSAGE_QUEUE_INVOCATIONS.find(item => item.method === 'edit')
+    expect(edit?.parameters.map(parameter => parameter.name)).toEqual(['sessionId', 'itemId', 'text'])
   })
 
   it('keeps descriptor results strict', () => {

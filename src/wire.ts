@@ -53,6 +53,12 @@ export interface MessageQueueRemote {
   state(sessionId: string): Promise<RemoteResult<QueueState>>
   /** Move one `next-turn` item to `toIndex`, clamped to the list bounds. */
   move(sessionId: string, itemId: string, toIndex: number): Promise<RemoteResult<QueueOrder>>
+  /** Edit one held (parked) item's text in place. */
+  edit(sessionId: string, itemId: string, text: string): Promise<RemoteResult<QueueState>>
+  /** Remove one held (parked) item. */
+  remove(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
+  /** Send one held (parked) item into the running turn ahead of the queue. */
+  steer(sessionId: string, itemId: string): Promise<RemoteResult<QueueState>>
   /** Pause claiming; the current turn finishes, later queued items stay queued. */
   pause(sessionId: string): Promise<RemoteResult<QueueState>>
   /** Resume claiming and restore parked items at the front of the queue. */
@@ -71,6 +77,9 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
       itemId: string,
       toIndex: number,
     ) => Promise<RemoteResult<QueueOrder>>
+    'messageQueue/edit': (sessionId: string, itemId: string, text: string) => Promise<RemoteResult<QueueState>>
+    'messageQueue/remove': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
+    'messageQueue/steer': (sessionId: string, itemId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/pause': (sessionId: string) => Promise<RemoteResult<QueueState>>
     'messageQueue/resume': (sessionId: string) => Promise<RemoteResult<QueueState>>
   }
@@ -78,8 +87,12 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   interface RemoteErrorDetailsMap {
     /** The Session has no live Agent to own a queue gate. */
     'message-queue/agent-not-attached': { readonly sessionId: string }
-    /** The requested item is not in the Session's pending `next-turn` list. */
+    /** The requested item is neither queued nor held by the pause gate. */
     'message-queue/item-not-found': { readonly sessionId: string; readonly itemId: string }
+    /** A held item was sent while no turn is running to accept steering. */
+    'message-queue/steer-unavailable': { readonly sessionId: string; readonly itemId: string }
+    /** A held item edit carried no non-whitespace text. */
+    'message-queue/invalid-content': { readonly sessionId: string; readonly itemId: string }
   }
 }
 
@@ -165,6 +178,9 @@ const ITEM_ID_CODEC = strictCodec('dsh-message-queue/types#QueueItemId', {
 const INDEX_CODEC = strictCodec('dsh-message-queue/types#QueueIndex', {
   parse: (value: unknown) => readIndex(value, 'toIndex'),
 })
+const TEXT_CODEC = strictCodec('dsh-message-queue/types#QueueText', {
+  parse: (value: unknown) => readId(value, 'text'),
+})
 const STATE_RESULT_CODEC = strictCodec('dsh-message-queue/types#QueueState', QUEUE_STATE_SCHEMA)
 const ORDER_RESULT_CODEC = strictCodec('dsh-message-queue/types#QueueOrder', QUEUE_ORDER_SCHEMA)
 
@@ -212,6 +228,37 @@ export const QUEUE_MOVE_DESCRIPTOR = descriptor(
   ORDER_RESULT_CODEC,
 )
 
+/** The `messageQueue/edit` invocation. */
+export const QUEUE_EDIT_DESCRIPTOR = descriptor(
+  'edit',
+  Object.freeze([
+    jsonParameter('sessionId', SESSION_ID_CODEC),
+    jsonParameter('itemId', ITEM_ID_CODEC),
+    jsonParameter('text', TEXT_CODEC),
+  ]),
+  STATE_RESULT_CODEC,
+)
+
+/** The `messageQueue/remove` invocation. */
+export const QUEUE_REMOVE_DESCRIPTOR = descriptor(
+  'remove',
+  Object.freeze([
+    jsonParameter('sessionId', SESSION_ID_CODEC),
+    jsonParameter('itemId', ITEM_ID_CODEC),
+  ]),
+  STATE_RESULT_CODEC,
+)
+
+/** The `messageQueue/steer` invocation. */
+export const QUEUE_STEER_DESCRIPTOR = descriptor(
+  'steer',
+  Object.freeze([
+    jsonParameter('sessionId', SESSION_ID_CODEC),
+    jsonParameter('itemId', ITEM_ID_CODEC),
+  ]),
+  STATE_RESULT_CODEC,
+)
+
 /** The `messageQueue/pause` invocation. */
 export const QUEUE_PAUSE_DESCRIPTOR = descriptor(
   'pause',
@@ -233,6 +280,9 @@ export const QUEUE_RESUME_DESCRIPTOR = descriptor(
 export const MESSAGE_QUEUE_INVOCATIONS: readonly InvocationDescriptor[] = Object.freeze([
   QUEUE_STATE_DESCRIPTOR,
   QUEUE_MOVE_DESCRIPTOR,
+  QUEUE_EDIT_DESCRIPTOR,
+  QUEUE_REMOVE_DESCRIPTOR,
+  QUEUE_STEER_DESCRIPTOR,
   QUEUE_PAUSE_DESCRIPTOR,
   QUEUE_RESUME_DESCRIPTOR,
 ])
